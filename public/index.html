@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>S-remote</title>
+<link rel="icon" type="image/svg+xml" href="/logo.svg">
+<link rel="apple-touch-icon" href="/logo.svg">
+<meta name="theme-color" content="#0a0d12">
+<link rel="stylesheet" href="/vendor/xterm.css">
+<link rel="stylesheet" href="/style.css?v=9">
+</head>
+<body>
+
+<!-- ============ HOME: pick a workspace ============ -->
+<div id="view-home">
+  <div class="home-head">
+    <div class="brand"><img src="/logo.svg" alt="S-remote">S<span>-</span>remote</div>
+    <div class="conn-pill"><span class="dot" id="conn-dot"></span><span id="conn-text">connecting…</span><span id="latency"></span></div>
+  </div>
+  <div class="home-body">
+    <div class="home-hero">
+      <img src="/logo.svg" alt="">
+      <div>
+        <h1>S-remote</h1>
+        <p>Direct remote terminal over Tailscale — no relay, no cloud.</p>
+      </div>
+    </div>
+    <div class="home-label">WORKSPACES</div>
+    <div id="ws-grid"></div>
+    <div class="home-label">ALL SESSIONS</div>
+    <div id="home-sessions"></div>
+  </div>
+</div>
+
+<!-- ============ WORK: terminal in a workspace ============ -->
+<div id="view-work" class="hidden">
+  <aside id="sidebar">
+    <div class="side-head">
+      <div class="side-brand" id="home-btn" title="Back to workspaces"><img src="/logo.svg" alt="">S-remote</div>
+      <button id="side-collapse" class="mini-btn" title="Hide panel (Ctrl+B)">«</button>
+    </div>
+    <div id="ws-title"></div>
+    <div class="side-section">
+      <div class="side-label">SESSIONS</div>
+      <div id="sess-list"></div>
+      <button id="new-btn">+ New terminal</button>
+    </div>
+    <div class="side-foot">
+      <div id="host-info"></div>
+      <div id="conn2"><span class="dot" id="conn-dot2"></span><span id="conn-text2">connecting…</span><span id="latency2"></span></div>
+    </div>
+  </aside>
+  <div class="resizer" id="rs-side"></div>
+  <div id="scrim"></div>
+  <main id="main">
+    <div id="topbar">
+      <button id="rail-open" class="mini-btn hidden" title="Show panel (Ctrl+B)">☰</button>
+      <div id="tabs"></div>
+      <button id="files-toggle" class="mini-btn on" title="Toggle files (Ctrl+J)">Files</button>
+    </div>
+    <div id="terms"></div>
+    <div id="typerow">
+      <input id="typer" type="text" placeholder="Type a command…" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" enterkeyhint="send">
+      <button id="typer-attach" class="ty-btn" title="Attach file"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
+      <button id="typer-raw" class="ty-btn" title="Insert text without Enter"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h12"/><path d="M11 7l5 5-5 5"/><path d="M21 4v16"/></svg></button>
+      <button id="typer-send" class="ty-btn ty-primary" title="Send + Enter"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg></button>
+      <input type="file" id="attach-file" hidden>
+    </div>
+    <div id="keybar"></div>
+    <div id="empty">
+      <div class="empty-inner">
+        <img src="/logo.svg" alt="">
+        <div class="empty-title">No session in this workspace</div>
+        <button id="empty-new" class="btn">New terminal</button>
+      </div>
+    </div>
+    <div id="disc-overlay"><span>Connection lost — reconnecting…</span></div>
+  </main>
+  <div class="resizer" id="rs-files"></div>
+  <aside id="filespanel">
+    <div class="fp-head">
+      <span class="fp-title">Files</span>
+      <button id="fp-refresh" class="mini-btn" title="Refresh">⟳</button>
+      <button id="fp-close" class="mini-btn" title="Hide (Ctrl+J)">×</button>
+    </div>
+    <div id="fp-crumbs"></div>
+    <div id="fp-list"></div>
+  </aside>
+</div>
+
+<!-- ============ modals ============ -->
+<div id="new-modal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-title"><img src="/logo.svg" alt="">New terminal</div>
+    <label>Name</label>
+    <input id="new-name" placeholder="(optional)">
+    <label>Shell</label>
+    <select id="new-shell"></select>
+    <label>Working directory</label>
+    <div class="cwd-row">
+      <input id="new-cwd" placeholder="C:\Users\User">
+      <button id="new-browse" class="btn-ghost" title="Browse…">…</button>
+    </div>
+    <div class="modal-actions">
+      <button id="new-cancel" class="btn-ghost">Cancel</button>
+      <button id="new-ok" class="btn">Create</button>
+    </div>
+  </div>
+</div>
+<div id="picker" class="modal hidden">
+  <div class="picker-card">
+    <div class="picker-toolbar">
+      <button id="pk-back" class="pk-btn" title="Back">‹</button>
+      <button id="pk-fwd" class="pk-btn" title="Forward">›</button>
+      <button id="pk-up" class="pk-btn" title="Up">↑</button>
+      <div id="pk-crumbs" class="pk-crumbs"></div>
+      <button id="pk-refresh" class="pk-btn" title="Refresh">⟳</button>
+    </div>
+    <div class="picker-body">
+      <div class="picker-quick" id="pk-quick"></div>
+      <div class="picker-main" id="pk-main"></div>
+    </div>
+    <div class="picker-foot">
+      <input id="pk-selected" readonly placeholder="Select a folder">
+      <div class="picker-foot-btns">
+        <button id="pk-newfolder" class="btn-ghost">New folder</button>
+        <button id="pk-cancel" class="btn-ghost">Cancel</button>
+        <button id="pk-ok" class="btn" disabled>Select folder</button>
+      </div>
+    </div>
+  </div>
+</div>
+<div id="file-modal" class="modal hidden">
+  <div class="file-card">
+    <div class="file-head">
+      <span id="file-name"></span>
+      <a id="file-dl" class="mini-btn" download>Download</a>
+      <button id="file-close" class="mini-btn">×</button>
+    </div>
+    <pre id="file-body"></pre>
+  </div>
+</div>
+<div id="toasts"></div>
+
+<script src="/vendor/xterm.js"></script>
+<script src="/vendor/addon-fit.js"></script>
+<script src="/app.js?v=9"></script>
+</body>
+</html>

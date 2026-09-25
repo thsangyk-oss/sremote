@@ -1,0 +1,9 @@
+node_modules/
+data/
+state.json
+server.log
+*.log
+*.7z
+*.zip
+.DS_Store
+Thumbs.db

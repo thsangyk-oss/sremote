@@ -1,0 +1,20 @@
+{
+  "name": "s-remote",
+  "version": "1.0.0",
+  "description": "Direct remote terminal over Tailscale — no relay",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "node-pty": "^1.2.0-beta.12",
+    "ws": "^8.21.3"
+  }
+}
