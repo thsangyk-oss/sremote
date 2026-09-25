@@ -711,7 +711,6 @@ function typerSend(withEnter) {
   typer.focus();
 }
 $("#typer-send").onclick = () => typerSend(true);
-$("#typer-raw").onclick = () => typerSend(false); // raw: never a trailing \r
 typer.addEventListener("input", typerGrow);
 typer.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); typerSend(true); } // Shift+Enter = literal newline
@@ -757,8 +756,22 @@ async function uploadFiles(files, dir = "temp-upload") { // sequential
   if (!fpRoot) return toast("Open a workspace or session first", "err");
   for (let i = 0; i < files.length; i++) await uploadFile(files[i], i === files.length - 1, dir);
 }
-$("#typer-attach").onclick = () => { attachDir = "temp-upload"; $("#attach-file").click(); };
-$("#typer-cam").onclick = () => $("#attach-cam").click();
+// typerow "＋" menu → attach / camera / snippets / raw-insert
+const typerMenu = $("#typer-menu");
+$("#typer-more").onclick = (e) => { e.stopPropagation(); typerMenu.classList.toggle("hidden"); };
+document.addEventListener("click", (e) => {
+  if (!typerMenu.classList.contains("hidden") && !typerMenu.contains(e.target) && e.target.id !== "typer-more" && !e.target.closest("#typer-more"))
+    typerMenu.classList.add("hidden");
+});
+typerMenu.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-a]");
+  if (!b) return;
+  typerMenu.classList.add("hidden");
+  if (b.dataset.a === "attach") { attachDir = "temp-upload"; $("#attach-file").click(); }
+  else if (b.dataset.a === "cam") $("#attach-cam").click();
+  else if (b.dataset.a === "snip") { renderSnips(); snipModal.classList.remove("hidden"); }
+  else if (b.dataset.a === "raw") typerSend(false);
+});
 $("#attach-file").addEventListener("change", (e) => {
   const fs = [...e.target.files]; e.target.value = "";
   const dir = attachDir; attachDir = "temp-upload";
@@ -796,7 +809,7 @@ function renderSnips() {
     el.appendChild(d);
   });
 }
-$("#typer-snip").onclick = () => { renderSnips(); snipModal.classList.remove("hidden"); };
+
 $("#snip-save").onclick = () => {
   const v = typer.value.trim();
   if (!v) return toast("Type something first", "err");

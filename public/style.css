@@ -231,7 +231,24 @@ body.disconnected #terms { opacity: .55; filter: saturate(.6); }
 body.touch-ui #typerow {
   display: flex; gap: 6px; padding: 7px 8px 0;
   background: var(--bg2); border-top: 1px solid var(--border); flex-shrink: 0;
+  position: relative;
 }
+#typer-menu {
+  position: absolute; bottom: calc(100% + 6px); right: 46px; z-index: 30;
+  display: flex; flex-direction: column; gap: 2px; min-width: 178px; padding: 5px;
+  background: var(--bg2); border: 1px solid var(--border-hi); border-radius: 10px;
+  box-shadow: var(--shadow);
+}
+.tm-item {
+  display: flex; align-items: center; gap: 9px; padding: 9px 12px;
+  background: none; border: 0; color: var(--fg); font-size: 13px; font-weight: 500;
+  border-radius: 7px; text-align: left; touch-action: manipulation;
+}
+.tm-item svg { flex-shrink: 0; color: var(--fg-dim); }
+.tm-item:hover, .tm-item:active { background: var(--bg3); }
+.tm-item:active svg { color: var(--accent); }
+.tm-touch { display: none; }
+body.touch-ui .tm-touch { display: flex; }
 #typer {
   flex: 1; min-width: 0; background: var(--bg); border: 1px solid var(--border);
   color: var(--fg); border-radius: 8px; padding: 9px 12px; font: 15px/1.2 "Cascadia Code", Consolas, monospace;
@@ -292,8 +309,7 @@ body.touch-ui #keybar::-webkit-scrollbar { display: none; }
 }
 
 /* ---------- typerow extras: progress bar, tab bell, dropzone, snippets, copy ---------- */
-#typer-cam { display: none; }
-body.touch-ui #typer-cam { display: flex; }
+
 #typer-prog { display: none; height: 2px; background: var(--bg); flex-shrink: 0; }
 #typer-prog.on { display: block; }
 #typer-prog i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--accent2)); transition: width .15s; }
