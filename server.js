@@ -5,8 +5,10 @@ const path = require("path");
 const os = require("os");
 const { WebSocketServer } = require("ws");
 const pty = require("node-pty");
+const { execFile } = require("child_process");
 
 const PORT = 2209;
+const IS_WIN = process.platform === "win32";
 const ROOT = __dirname;
 const PUBLIC = path.join(ROOT, "public");
 const STATE_FILE = path.join(ROOT, "state.json");
@@ -63,6 +65,11 @@ function persistSessions() {
 
 // ---------- directory browse ----------
 function listDrives() {
+  if (!IS_WIN) {
+    const d = [{ name: "/", path: "/", drive: true }];
+    if (fs.existsSync(os.homedir())) d.push({ name: "~", path: os.homedir() });
+    return d;
+  }
   const drives = [];
   for (let c = 65; c <= 90; c++) {
     const d = String.fromCharCode(c) + ":\\";
@@ -100,11 +107,25 @@ function browseDir(p) {
 }
 
 // ---------- shell profiles ----------
-const SHELLS = {
-  powershell: { path: "powershell.exe", args: ["-NoLogo"] },
-  cmd: { path: "cmd.exe", args: [] },
-  pwsh: { path: "pwsh.exe", args: ["-NoLogo"] },
-};
+const SHELLS = IS_WIN
+  ? {
+      powershell: { path: "powershell.exe", args: ["-NoLogo"] },
+      cmd: { path: "cmd.exe", args: [] },
+      pwsh: { path: "pwsh.exe", args: ["-NoLogo"] },
+    }
+  : (() => {
+      const sh = {};
+      const add = (p) => {
+        try { fs.accessSync(p, fs.constants.X_OK); sh[path.basename(p)] = { path: p, args: [] }; } catch {}
+      };
+      if (process.env.SHELL) add(process.env.SHELL);
+      for (const p of ["/bin/bash", "/usr/bin/zsh", "/bin/zsh", "/bin/sh"]) add(p);
+      if (!sh.pwsh) for (const d of (process.env.PATH || "").split(path.delimiter)) {
+        const p = path.join(d, "pwsh");
+        try { fs.accessSync(p, fs.constants.X_OK); sh.pwsh = { path: p, args: ["-NoLogo"] }; break; } catch {}
+      }
+      return sh;
+    })();
 
 // ---------- PTY sessions (persisted & restorable) ----------
 const sessions = new Map(); // id -> {id,name,shell,cwd,workspace,proc,scrollback,createdAt,clients:Set,exited}
@@ -126,7 +147,7 @@ function cleanEnv() {
 }
 
 function spawnProc(sess) {
-  const s = SHELLS[sess.shell] || SHELLS.powershell;
+  const s = SHELLS[sess.shell] || SHELLS.powershell || Object.values(SHELLS)[0];
   const proc = pty.spawn(s.path, s.args, {
     name: "xterm-256color", cols: sess.cols || 120, rows: sess.rows || 32, cwd: sess.cwd,
     env: cleanEnv(),
@@ -206,6 +227,149 @@ function broadcastSessions() {
   for (const ws of wss ? wss.clients : []) if (ws.readyState === 1) ws.send(msg);
 }
 
+// ---------- external integrations (tailscale / netstat / git) ----------
+// execFile everywhere — arg arrays only, never shell strings; bounded by timeout
+const run = (cmd, args, ms, max = 4 * 1024 * 1024) => new Promise((r) =>
+  execFile(cmd, args, { timeout: ms, maxBuffer: max, windowsHide: true },
+    (e, so, se) => r({ ok: !e, out: (so || "").toString(), err: (se || (e && e.message) || "").toString() })));
+
+// keep <root>/temp-upload out of the repo index — append to .git/info/exclude
+function gitExcludeTmpUpload(root) {
+  try {
+    if (!fs.existsSync(path.join(root, ".git")) || !fs.statSync(path.join(root, ".git")).isDirectory()) return;
+    const info = path.join(root, ".git", "info");
+    fs.mkdirSync(info, { recursive: true });
+    const ex = path.join(info, "exclude");
+    let cur = ""; try { cur = fs.readFileSync(ex, "utf8"); } catch {}
+    if (!cur.split(/\r?\n/).includes("temp-upload/"))
+      fs.appendFileSync(ex, (cur && !cur.endsWith("\n") ? "\n" : "") + "temp-upload/\n");
+  } catch {}
+}
+
+// delete stale drop-zone files (mtime > 7 days), best-effort
+function sweepTmpUpload(dir) {
+  try {
+    const now = Date.now();
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (!e.isFile()) continue;
+      const f = path.join(dir, e.name);
+      try { if (now - fs.statSync(f).mtimeMs > 7 * 86400e3) fs.rmSync(f, { force: true }); } catch {}
+    }
+  } catch {}
+}
+
+async function apiPeers(res) {
+  const r = await run("tailscale", ["status", "--json"], 4000);
+  let st = null;
+  try { st = r.ok ? JSON.parse(r.out) : null; } catch {}
+  const nodes = st ? [st.Self, ...Object.values(st.Peer || {})].filter(Boolean) : [];
+  const peers = nodes.map((n) => ({
+    self: n === (st && st.Self),
+    hostname: n.HostName || "", dnsName: (n.DNSName || "").replace(/\.$/, ""), os: n.OS || "",
+    ip: (n.TailscaleIPs || []).find((a) => !a.includes(":")) || null,
+    online: !!n.Online, direct: !!n.CurAddr, relay: n.Relay || null, userId: n.UserID || null,
+    sremote: null,
+  }));
+  await Promise.allSettled(peers.filter((p) => p.online && p.ip).map(async (p) => {
+    try {
+      const rr = await fetch(`http://${p.ip}:${PORT}/api/info`, { signal: AbortSignal.timeout(1500) });
+      if (rr.ok) p.sremote = await rr.json();
+    } catch {}
+  }));
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ peers }));
+}
+
+async function apiDevports(res) {
+  const r = IS_WIN
+    ? await run("netstat", ["-ano", "-p", "tcp"], 4000)
+    : await run("ss", ["-tlnH"], 4000).then((x) => (x.ok ? x : run("netstat", ["-tln"], 4000)));
+  const ports = [], seen = new Set(), pids = new Set();
+  const localAddr = (s) => { const i = s.lastIndexOf(":"); return i < 0 ? null : [s.slice(0, i), +s.slice(i + 1)]; };
+  for (const ln of r.out.split(/\r?\n/)) {
+    const t = ln.trim().split(/\s+/);
+    let addr = null, port = 0, pid = 0;
+    if (IS_WIN) {                       // TCP  local  foreign  LISTENING  pid
+      if (t.length < 5 || !/^TCP/i.test(t[0]) || t[3] !== "LISTENING") continue;
+      const l = localAddr(t[1]); if (!l) continue;
+      [addr, port] = l; pid = +t[4] || 0;
+    } else {                            // ss: LISTEN rq sq local peer ; netstat -tln: tcp r s local peer LISTEN
+      if (t.length >= 4 && /^LISTEN$/i.test(t[0])) { const l = localAddr(t[3]); if (!l) continue; [addr, port] = l; }
+      else if (t.length >= 5 && /^tcp/i.test(t[0]) && /LISTEN/i.test(t[t.length - 1])) {
+        const l = localAddr(t[3]); if (!l) continue; [addr, port] = l;
+      } else continue;
+    }
+    if (!port || port === PORT) continue;
+    const key = `${addr}:${port}:${pid}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (pid) pids.add(pid);
+    ports.push({
+      port, addr, pid,
+      loopback: addr.startsWith("127.") || addr === "::1" || addr === "[::1]",
+      proc: null,
+    });
+  }
+  if (IS_WIN && pids.size) {
+    const tr = await run("tasklist", ["/fo", "csv", "/nh"], 4000);
+    if (tr.ok) {
+      const names = {};
+      for (const ln of tr.out.split(/\r?\n/)) {
+        const m = /^"([^"]*)","(\d+)"/.exec(ln);
+        if (m && pids.has(+m[2])) names[m[2]] = m[1];
+      }
+      for (const p of ports) p.proc = names[p.pid] || null;
+    }
+  }
+  ports.sort((a, b) => a.port - b.port);
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ ports: ports.slice(0, 50) }));
+}
+
+async function apiGit(res, root) {
+  const r = await run("git", ["-C", root, "rev-parse", "--is-inside-work-tree"], 3000);
+  if (!r.ok || r.out.trim() !== "true") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify({ isRepo: false }));
+  }
+  const br = await run("git", ["-C", root, "branch", "--show-current"], 3000);
+  let branch = br.out.trim();
+  if (!branch) {
+    const h = await run("git", ["-C", root, "rev-parse", "--short", "HEAD"], 3000);
+    branch = h.ok ? h.out.trim() : null; // detached; null when HEAD is unborn
+  }
+  const st = await run("git", ["-C", root, "status", "--porcelain"], 3000);
+  const changed = st.ok ? st.out.split(/\r?\n/).filter((l) => l.trim()).length : 0;
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ isRepo: true, branch, changed }));
+}
+
+async function apiGitDiff(res, root) {
+  const chk = await run("git", ["-C", root, "rev-parse", "--is-inside-work-tree"], 3000);
+  if (!chk.ok || chk.out.trim() !== "true") return jsonErr(res, 400, "not a repo");
+  const head = await run("git", ["-C", root, "rev-parse", "--verify", "HEAD"], 3000);
+  let stat, diff;
+  if (head.ok) {
+    const [s, d] = await Promise.all([
+      run("git", ["-C", root, "diff", "HEAD", "--stat"], 4000),
+      run("git", ["-C", root, "diff", "HEAD"], 5000, 32 * 1024 * 1024),
+    ]);
+    stat = s.out; diff = d.out;
+  } else { // unborn HEAD — nothing to diff against; show untracked + unstaged
+    const [por, s, d] = await Promise.all([
+      run("git", ["-C", root, "status", "--porcelain"], 4000),
+      run("git", ["-C", root, "diff", "--stat"], 4000),
+      run("git", ["-C", root, "diff"], 5000, 32 * 1024 * 1024),
+    ]);
+    stat = (por.out + s.out).trim(); diff = d.out;
+  }
+  const CAP = 256 * 1024;
+  const truncated = diff.length > CAP;
+  if (truncated) diff = diff.slice(0, CAP);
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ stat, diff, truncated }));
+}
+
 // ---------- HTTP ----------
 const MIME = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".json": "application/json", ".png": "image/png", ".svg": "image/svg+xml", ".woff2": "font/woff2" };
 
@@ -268,6 +432,17 @@ const server = http.createServer((req, res) => {
     });
   }
   const wm = /^\/api\/workspaces\/([\w-]+)$/.exec(url.pathname);
+  if (wm && req.method === "PATCH") {
+    return readBody(req, res, (b) => {
+      const w = workspaceById(wm[1]);
+      if (!w) { res.writeHead(404); return res.end(); }
+      const name = String(b.name || "").trim().slice(0, 60);
+      if (!name) return jsonErr(res, 400, "bad name");
+      w.name = name; saveState();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(w));
+    });
+  }
   if (wm && req.method === "DELETE") {
     const i = state.workspaces.findIndex((w) => w.id === wm[1]);
     if (i < 0) { res.writeHead(404); return res.end(); }
@@ -329,12 +504,25 @@ const server = http.createServer((req, res) => {
       return stream.pipe(res);
     } catch (e) { return jsonErr(res, 403, e.code || "unreadable"); }
   }
-  // upload into <base>/temp-upload/ — raw body, name via query
+  if (url.pathname === "/api/peers" && req.method === "GET") return apiPeers(res);
+  if (url.pathname === "/api/devports" && req.method === "GET") return apiDevports(res);
+  if (url.pathname === "/api/git" && req.method === "GET") {
+    const root = resolveBase(url.searchParams.get("base"));
+    if (!root) return jsonErr(res, 400, "bad base");
+    return apiGit(res, root);
+  }
+  if (url.pathname === "/api/gitdiff" && req.method === "GET") {
+    const root = resolveBase(url.searchParams.get("base"));
+    if (!root) return jsonErr(res, 400, "bad base");
+    return apiGitDiff(res, root);
+  }
+  // upload into <base>/<dir>/ (default temp-upload) — raw body, name via query
   if (url.pathname === "/api/upload" && req.method === "POST") {
     const root = resolveBase(url.searchParams.get("base"));
     if (!root) return jsonErr(res, 400, "bad base");
     let name = path.basename(url.searchParams.get("name") || "file").replace(/[\\/:*?"<>|]/g, "_") || "file";
-    const dir = path.join(root, "temp-upload");
+    const dir = jail(root, url.searchParams.get("dir") || "temp-upload");
+    if (!dir) return jsonErr(res, 403, "outside jail");
     try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { return jsonErr(res, 400, e.code || "mkdir failed"); }
     let dest = path.join(dir, name);
     for (let i = 1; fs.existsSync(dest) && i < 100; i++)
@@ -347,10 +535,47 @@ const server = http.createServer((req, res) => {
     req.pipe(out);
     out.on("error", (e) => fail(400, e.code || "write failed"));
     out.on("finish", () => {
+      if (dir === path.join(root, "temp-upload")) { // default drop zone only
+        gitExcludeTmpUpload(root);
+        sweepTmpUpload(dir);
+      }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ path: dest, rel: path.relative(root, dest), size }));
     });
     return;
+  }
+  // file ops jailed under a base: {base, op: "rename"|"delete"|"mkdir", path, name}
+  if (url.pathname === "/api/fileop" && req.method === "POST") {
+    return readBody(req, res, (b) => {
+      const root = resolveBase(b.base);
+      if (!root) return jsonErr(res, 400, "bad base");
+      const target = jail(root, b.path);
+      if (!target) return jsonErr(res, 403, "outside jail");
+      const okName = (n) => typeof n === "string" && /^[^\\/:*?"<>|]+$/.test(n.trim());
+      const jailedChild = (parent, n) => {
+        const t = path.join(parent, n.trim());
+        return t === root || t.startsWith(root + path.sep) ? t : null;
+      };
+      try {
+        if (b.op === "rename") {
+          if (target === root) return jsonErr(res, 400, "cannot rename base root");
+          if (!okName(b.name)) return jsonErr(res, 400, "bad name");
+          const dest = jailedChild(path.dirname(target), b.name);
+          if (!dest) return jsonErr(res, 403, "outside jail");
+          fs.renameSync(target, dest);
+        } else if (b.op === "delete") {
+          if (target === root) return jsonErr(res, 400, "cannot delete base root");
+          fs.rmSync(target, { recursive: true, force: true });
+        } else if (b.op === "mkdir") { // path = parent dir, name = new dir
+          if (!okName(b.name)) return jsonErr(res, 400, "bad name");
+          const dest = jailedChild(target, b.name);
+          if (!dest) return jsonErr(res, 403, "outside jail");
+          fs.mkdirSync(dest);
+        } else return jsonErr(res, 400, "bad op");
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end("{}");
+      } catch (e) { jsonErr(res, 400, e.code || "fileop failed"); }
+    });
   }
   if (url.pathname === "/api/sessions" && req.method === "GET") {
     res.writeHead(200, { "Content-Type": "application/json" });
@@ -423,7 +648,7 @@ wss.on("connection", (ws, req) => {
         if (s && !s.exited && s.proc) { try { s.proc.resize(msg.cols, msg.rows); } catch {} }
         break;
       case "create": {
-        const ns = createSession({ shell: msg.shell, cwd: msg.cwd, cols: msg.cols, rows: msg.rows, workspace: msg.workspace });
+        const ns = createSession({ shell: msg.shell, cwd: msg.cwd, cols: msg.cols, rows: msg.rows, workspace: msg.workspace, name: msg.name });
         ws.send(JSON.stringify({ type: "created", id: ns.id }));
         break;
       }
@@ -451,6 +676,7 @@ wss.on("connection", (ws, req) => {
 
 // ---------- boot ----------
 restoreSessions();
+for (const w of state.workspaces) sweepTmpUpload(path.join(w.path, "temp-upload"));
 setInterval(() => { for (const s of sessions.values()) flushScrollback(s); }, 3000);
 for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   process.on(sig, () => {

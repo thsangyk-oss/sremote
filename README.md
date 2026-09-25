@@ -10,28 +10,33 @@ Web UI (xterm.js) + PTY sessions that persist across restarts.
 
 ## Install on another machine
 
-1. Copy this folder (`S-remote`) to the target machine — `node_modules` is
-   already included and `node-pty` ships prebuilt binaries for
-   Windows/macOS/Linux (x64 + arm64), so no build step is needed.
-2. Run:
+**Windows (packaged release):**
 
-   ```bash
-   node server.js        # or: npm start
-   ```
-
+1. Download `S-remote-v1.0.0-win-x64.7z` from
+   [GitHub Releases](https://github.com/thsangyk-oss/sremote/releases) and
+   extract it — `node_modules` is included and `node-pty` ships prebuilt
+   binaries for Windows/macOS/Linux (x64 + arm64), so no build step is needed.
+2. Either:
+   - `install.bat` — register auto-start at logon (Task Scheduler), add an
+     inbound firewall rule for TCP 2209 when run elevated, and start now; or
+   - `start.bat` — manual one-off start (equivalent to `node server.js`).
 3. Open from any device in the tailnet:
 
    ```
    http://<machine-tailscale-ip>:2209
    ```
 
+**From source (any OS):** clone/copy this folder and run `node server.js`
+(`npm install` first if `node_modules` is absent — `node-pty` needs a
+prebuilt binary for your platform).
+
 Access is restricted to tailnet IPs (`100.64.0.0/10`) and localhost — anything
 else gets 403 before reaching the app.
 
 ### First run on Windows
 
-Windows Firewall may prompt to allow `node.exe` to listen — approve it, or add
-a rule limited to the Tailscale interface:
+`install.bat` adds the firewall rule automatically when elevated. To add it
+manually, limited to the Tailscale interface:
 
 ```powershell
 New-NetFirewallRule -DisplayName "S-remote" -Direction Inbound `
@@ -41,14 +46,13 @@ New-NetFirewallRule -DisplayName "S-remote" -Direction Inbound `
 
 ## Autostart
 
-**Windows (Task Scheduler):**
+**Windows:** `install.bat` sets up Task Scheduler at logon (see above).
+Equivalent manual command:
 
 ```powershell
 schtasks /create /tn "S-remote" /tr "node C:\path\to\S-remote\server.js" `
   /sc onlogon /rl highest /f
 ```
-
-Or double-click `start.bat` for a manual start.
 
 **Linux (systemd):**
 
@@ -68,6 +72,40 @@ WantedBy=multi-user.target
 
 **macOS (launchd):** create `~/Library/LaunchAgents/com.S-remote.plist`
 with a `KeepAlive` ProgramArguments entry pointing at `server.js`.
+
+## Platform notes
+
+- **Windows:** shells are `powershell` / `cmd` / `pwsh`; the folder picker
+  scans drives `A:`–`Z:`.
+- **Linux/macOS:** shells are detected from `$SHELL` plus `/bin/bash`,
+  `/usr/bin/zsh`, `/bin/zsh`, `/bin/sh` (and `pwsh` if on PATH); the folder
+  picker lists `/` and `~` instead of drives.
+
+## HTTP API
+
+Base path for file/git endpoints is `base=` — either `ws:<workspace-id>` or an
+absolute directory. All paths are jailed under the base.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/info` | Host info: hostname, tailscale IP, available shells |
+| GET | `/api/browse?path=` | Dir listing for the folder picker (drives when empty) |
+| POST | `/api/mkdir` | `{parent, name}` — create directory |
+| GET/POST | `/api/workspaces` | List / create workspace `{path, name}` |
+| PATCH/DELETE | `/api/workspaces/:id` | Rename `{name}` / remove workspace |
+| GET | `/api/files?base=&path=` | List directory under base |
+| GET | `/api/file?base=&path=` | Read file (`&dl=1` attachment, `&head=1` first 512 KB) |
+| POST | `/api/upload?base=&name=&dir=` | Raw-body upload into `<base>/<dir>` (default `temp-upload`) |
+| GET/POST | `/api/sessions` | List / create PTY session `{shell, cwd, workspace, name}` |
+| DELETE | `/api/sessions/:id` | Kill session |
+| GET | `/api/peers` | Tailnet peers + probe of their S-remote instance |
+| GET | `/api/devports` | Listening TCP ports + owning process name |
+| GET | `/api/git?base=` | `{isRepo, branch, changed}` for a base dir |
+| GET | `/api/gitdiff?base=` | `{stat, diff, truncated}` vs `HEAD` (diff capped ~256 KB) |
+| WS | `/ws` | Terminal I/O: `attach` / `in` / `out` / `resize` / `create` / `rename` / `kill` |
+
+Uploads that land in `<base>/temp-upload/` are added to `.git/info/exclude`
+when the base is a git repo, and files there are swept after 7 days.
 
 ## Files
 

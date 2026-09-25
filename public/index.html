@@ -10,8 +10,9 @@
 <link rel="icon" type="image/svg+xml" href="/logo.svg">
 <link rel="apple-touch-icon" href="/logo.svg">
 <meta name="theme-color" content="#0a0d12">
+<link rel="manifest" href="/manifest.webmanifest">
 <link rel="stylesheet" href="/vendor/xterm.css">
-<link rel="stylesheet" href="/style.css?v=9">
+<link rel="stylesheet" href="/style.css?v=10">
 </head>
 <body>
 
@@ -31,6 +32,14 @@
     </div>
     <div class="home-label">WORKSPACES</div>
     <div id="ws-grid"></div>
+    <div id="peers-sec" class="hidden">
+      <div class="home-label">MACHINES</div>
+      <div id="home-peers"></div>
+    </div>
+    <div id="dev-sec" class="hidden">
+      <div class="home-label">DEV SERVERS</div>
+      <div id="home-dev"></div>
+    </div>
     <div class="home-label">ALL SESSIONS</div>
     <div id="home-sessions"></div>
   </div>
@@ -52,6 +61,7 @@
     <div class="side-foot">
       <div id="host-info"></div>
       <div id="conn2"><span class="dot" id="conn-dot2"></span><span id="conn-text2">connecting…</span><span id="latency2"></span></div>
+      <button id="side-set" class="mini-btn" title="Settings">⚙ Settings</button>
     </div>
   </aside>
   <div class="resizer" id="rs-side"></div>
@@ -60,16 +70,29 @@
     <div id="topbar">
       <button id="rail-open" class="mini-btn hidden" title="Show panel (Ctrl+B)">☰</button>
       <div id="tabs"></div>
+      <button id="pal-btn" class="mini-btn" title="Command palette (Ctrl+K)">🔍</button>
+      <button id="split-btn" class="mini-btn" title="Split terminal">◫</button>
+      <button id="set-btn" class="mini-btn" title="Settings">⚙</button>
       <button id="files-toggle" class="mini-btn on" title="Toggle files (Ctrl+J)">Files</button>
     </div>
     <div id="terms"></div>
+    <div id="term-search" class="hidden">
+      <input id="ts-in" placeholder="Find in terminal" autocomplete="off" spellcheck="false">
+      <button id="ts-prev" class="mini-btn" title="Previous (Shift+Enter)">↑</button>
+      <button id="ts-next" class="mini-btn" title="Next (Enter)">↓</button>
+      <button id="ts-x" class="mini-btn" title="Close (Esc)">×</button>
+    </div>
     <div id="typerow">
-      <input id="typer" type="text" placeholder="Type a command…" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" enterkeyhint="send">
+      <textarea id="typer" rows="1" placeholder="Type a command…" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" enterkeyhint="enter"></textarea>
+      <button id="typer-snip" class="ty-btn" title="Snippets"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg></button>
       <button id="typer-attach" class="ty-btn" title="Attach file"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
+      <button id="typer-cam" class="ty-btn" title="Take photo"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg></button>
       <button id="typer-raw" class="ty-btn" title="Insert text without Enter"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h12"/><path d="M11 7l5 5-5 5"/><path d="M21 4v16"/></svg></button>
       <button id="typer-send" class="ty-btn ty-primary" title="Send + Enter"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg></button>
-      <input type="file" id="attach-file" hidden>
+      <input type="file" id="attach-file" hidden multiple>
+      <input type="file" id="attach-cam" hidden accept="image/*" capture="environment">
     </div>
+    <div id="typer-prog"><i></i></div>
     <div id="keybar"></div>
     <div id="empty">
       <div class="empty-inner">
@@ -78,12 +101,17 @@
         <button id="empty-new" class="btn">New terminal</button>
       </div>
     </div>
+    <div id="dropzone"><span>Drop to upload → temp-upload</span></div>
     <div id="disc-overlay"><span>Connection lost — reconnecting…</span></div>
   </main>
   <div class="resizer" id="rs-files"></div>
   <aside id="filespanel">
     <div class="fp-head">
       <span class="fp-title">Files</span>
+      <button id="fp-diff" class="mini-btn hidden" title="Git diff vs HEAD">Diff</button>
+      <button id="fp-newfile" class="mini-btn" title="New file here">＋</button>
+      <button id="fp-newdir" class="mini-btn" title="New folder here">📁</button>
+      <button id="fp-upload" class="mini-btn" title="Upload into current folder">⇪</button>
       <button id="fp-refresh" class="mini-btn" title="Refresh">⟳</button>
       <button id="fp-close" class="mini-btn" title="Hide (Ctrl+J)">×</button>
     </div>
@@ -142,12 +170,89 @@
       <button id="file-close" class="mini-btn">×</button>
     </div>
     <pre id="file-body"></pre>
+    <img id="file-img" class="hidden" alt="">
+    <div id="file-body-html" class="md hidden"></div>
+  </div>
+</div>
+<div id="snip-modal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-title"><img src="/logo.svg" alt="">Snippets</div>
+    <div id="snip-list"></div>
+    <div class="modal-actions">
+      <button id="snip-save" class="btn-ghost">Save current</button>
+      <button id="snip-close" class="btn">Close</button>
+    </div>
+  </div>
+</div>
+<div id="copy-modal" class="modal hidden">
+  <div class="modal-card copy-card">
+    <div class="modal-title"><img src="/logo.svg" alt="">Terminal buffer</div>
+    <textarea id="copy-text" readonly spellcheck="false"></textarea>
+    <div class="modal-actions">
+      <button id="copy-cancel" class="btn-ghost">Close</button>
+      <button id="copy-ok" class="btn">Copy</button>
+    </div>
+  </div>
+</div>
+<div id="palette" class="hidden">
+  <div class="pal-card">
+    <input id="pal-in" placeholder="Jump to session, workspace, or action…" autocomplete="off" autocapitalize="none" spellcheck="false">
+    <div id="pal-list"></div>
+  </div>
+</div>
+<div id="settings-modal" class="modal hidden">
+  <div class="modal-card set-card">
+    <div class="modal-title"><img src="/logo.svg" alt="">Settings</div>
+    <div class="set-row">
+      <span class="set-label">Font size</span>
+      <div class="set-ctl">
+        <button id="set-font-m" class="mini-btn" title="Smaller">−</button>
+        <span id="set-font-n">14</span>
+        <button id="set-font-p" class="mini-btn" title="Larger">+</button>
+      </div>
+    </div>
+    <div class="set-row">
+      <span class="set-label">Theme</span>
+      <div class="seg" id="set-theme">
+        <button data-v="dark">Dark</button>
+        <button data-v="light">Light</button>
+      </div>
+    </div>
+    <div class="set-row">
+      <span class="set-label">Default shell</span>
+      <select id="set-shell"></select>
+    </div>
+    <div class="set-row set-col">
+      <span class="set-label">Keybar keys</span>
+      <div id="set-keys"></div>
+    </div>
+    <div class="set-row">
+      <span class="set-label">Layout</span>
+      <button id="set-reset" class="btn-ghost">Reset layout</button>
+    </div>
+    <div class="modal-actions">
+      <button id="set-close" class="btn">Done</button>
+    </div>
+  </div>
+</div>
+<div id="diff-modal" class="modal hidden">
+  <div class="file-card diff-card">
+    <div class="file-head">
+      <span id="diff-title">git diff</span>
+      <button id="diff-refresh" class="mini-btn" title="Refresh">⟳</button>
+      <button id="diff-close" class="mini-btn">×</button>
+    </div>
+    <pre id="diff-stat"></pre>
+    <pre id="diff-body"></pre>
   </div>
 </div>
 <div id="toasts"></div>
 
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-fit.js"></script>
-<script src="/app.js?v=9"></script>
+<script src="/vendor/addon-search.js"></script>
+<script src="/vendor/addon-web-links.js"></script>
+<script src="/vendor/addon-unicode11.js"></script>
+<script src="/app.js?v=10"></script>
 </body>
 </html>

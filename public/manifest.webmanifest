@@ -1,0 +1,11 @@
+{
+  "name": "S-remote",
+  "short_name": "S-remote",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#0a0d12",
+  "theme_color": "#0a0d12",
+  "icons": [
+    { "src": "/logo.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

@@ -10,8 +10,17 @@ let workspaces = [];        // persisted workspace folders
 let activeId = null;
 let view = "home";          // 'home' | 'work'
 let currentWs = undefined;  // workspace id | null (standalone) | undefined (home)
-const panes = new Map();    // id -> {term, fit, el, attached}
+const panes = new Map();    // id -> {term, fit, el, attached, lastOutAt, idleNotified, title, search}
 let hostInfo = {};
+const unreadSess = new Set(); // sessions with unseen output (drives .tab.unread)
+let splitId = null;         // session id in the unfocused split pane (null = no split)
+let splitFocus = "left";    // which split side holds the focused (activeId) session
+let fontSize = parseInt(localStorage.getItem("rd.font") || "14", 10) || 14;
+const TERM_THEMES = {
+  dark:  { background: "#0d1117", foreground: "#e6edf3" },
+  light: { background: "#fbfcfe", foreground: "#1c2330" },
+};
+let themeName = localStorage.getItem("rd.theme") === "light" ? "light" : "dark";
 
 const sessListEl = $("#sess-list"), tabsEl = $("#tabs"), termsEl = $("#terms");
 const emptyEl = $("#empty"), sidebar = $("#sidebar"), filesPanel = $("#filespanel");
@@ -43,6 +52,17 @@ function shortPath(p) {
   if (!p) return "";
   const parts = p.replace(/\\/g, "/").split("/").filter(Boolean);
   return parts.length > 2 ? "…/" + parts.slice(-2).join("/") : p;
+}
+function relTime(t) {
+  if (!t) return "";
+  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (s < 10) return "just now";
+  if (s < 60) return s + "s";
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + "m";
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + "h";
+  return Math.floor(h / 24) + "d";
 }
 function fmtSize(n) {
   if (n < 1024) return n + " B";
@@ -77,6 +97,7 @@ function connect() {
     switch (m.type) {
       case "sessions":
         sessions = m.list;
+        if (splitId && !inView(splitId)) { splitId = null; splitFocus = "left"; }
         renderAll();
         if (view === "work" && !inView(activeId)) {
           const vis = sessInView().filter((s) => !s.exited);
@@ -86,7 +107,16 @@ function connect() {
         break;
       case "out": {
         const p = panes.get(m.id);
-        if (p) p.term.write(m.data);
+        if (p) {
+          p.term.write(m.data);
+          p.lastOutAt = Date.now(); p.idleNotified = false; // reset busy→quiet edge
+          if (m.id !== activeId) {
+            unreadSess.add(m.id);
+            const t = tabsEl.querySelector(`[data-id="${m.id}"]`);
+            if (t) t.classList.add("unread");
+          }
+          if (m.data.includes("\x07") || m.data.includes("\x1b]9;") || m.data.includes("\x1b]777;")) notifySession(m.id, "bell");
+        }
         break;
       }
       case "attached": {
@@ -132,9 +162,11 @@ function showView(v) {
   $("#view-home").classList.toggle("hidden", v !== "home");
   $("#view-work").classList.toggle("hidden", v !== "work");
   if (v === "work") renderAll();
+  else { renderMachines(); renderDevports(); } // refresh tailnet + dev-server cards on each home show
 }
 function enterWorkspace(wsId) {
   currentWs = wsId;            // id | null (standalone)
+  splitId = null; splitFocus = "left";
   const w = wsId ? wsById(wsId) : null;
   $("#ws-title").innerHTML = w
     ? `<span class="wt-name">${folderSvg(16)} ${esc(w.name)}</span><span class="wt-path">${esc(w.path)}</span>`
@@ -154,6 +186,8 @@ function enterWorkspace(wsId) {
 function goHome() {
   view = "home";
   activeId = null;             // sessions keep running; panes stay attached
+  splitId = null; splitFocus = "left";
+  termsEl.classList.remove("split");
   for (const p of panes.values()) p.el.classList.add("hidden");
   showView("home");
 }
@@ -168,22 +202,30 @@ function ensurePane(id) {
   termsEl.appendChild(el);
   const term = new Terminal({
     fontFamily: "'Cascadia Code', 'Cascadia Mono', Consolas, monospace",
-    fontSize: 14, cursorBlink: true, scrollback: 5000,
-    theme: { background: "#0d1117", foreground: "#e6edf3" },
+    fontSize, cursorBlink: true, scrollback: 5000,
+    theme: { ...TERM_THEMES[themeName] },
     allowProposedApi: true,
   });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
+  p = { term, fit, el, attached: false, title: "", lastOutAt: 0, idleNotified: false, search: null };
+  if (window.SearchAddon) { try { p.search = new SearchAddon.SearchAddon(); term.loadAddon(p.search); } catch {} }
+  if (window.WebLinksAddon) { try { term.loadAddon(new WebLinksAddon.WebLinksAddon()); } catch {} }
+  if (window.Unicode11Addon) { try { term.loadAddon(new Unicode11Addon.Unicode11Addon()); term.unicode.activeVersion = "11"; } catch {} }
   term.open(el);
   term.onData((d) => send({ type: "in", id, data: d }));
   term.onResize(({ cols, rows }) => send({ type: "resize", id, cols, rows }));
+  term.onTitleChange((t) => { p.title = t; renderTabs(); });
   term.attachCustomKeyEventHandler((e) => {
-    if (e.ctrlKey && e.shiftKey && e.key === "V") { navigator.clipboard.readText().then((t) => send({ type: "in", id, data: t })); return false; }
+    if (e.type === "keydown" && e.shiftKey && e.key === "Enter") { send({ type: "in", id, data: "\x1b\r" }); return false; } // Shift+Enter → Alt+Enter (Devin newline)
+    if (e.type === "keydown" && e.ctrlKey && e.shiftKey && e.key === "V") { navigator.clipboard.readText().then((t) => send({ type: "in", id, data: t })); return false; }
+    if (e.type === "keydown" && e.ctrlKey && !e.shiftKey && e.key === "f") { openTermSearch(); return false; } // Ctrl+F search
+    if (e.type === "keydown" && e.ctrlKey && !e.shiftKey && !e.altKey && (e.key === "k" || e.key === "K")) { openPalette(); return false; } // Ctrl+K palette
     return true;
   });
-  p = { term, fit, el, attached: false };
   panes.set(id, p);
   el.addEventListener("touchstart", () => term.focus(), { passive: true }); // open keyboard on tap
+  el.addEventListener("mousedown", () => focusSide(id)); // split: pane click claims focus
   return p;
 }
 function attach(id, p) {
@@ -193,13 +235,78 @@ function sendSize(id, p) {
   try { p.fit.fit(); } catch {}
   send({ type: "resize", id, cols: p.term.cols, rows: p.term.rows });
 }
+// split: activeId = focused session, splitId = the OTHER visible one.
+// Focused side renders activeId; the other side renders splitId.
+const leftPaneId  = () => (splitFocus === "left"  ? activeId : splitId);
+const rightPaneId = () => (splitFocus === "right" ? activeId : splitId);
+function layoutPanes() {
+  const on = !!splitId && view === "work" && !!activeId;
+  termsEl.classList.toggle("split", on);
+  const sb = $("#split-btn");
+  if (sb) sb.classList.toggle("on", on);
+  const L = on ? leftPaneId() : null, R = on ? rightPaneId() : null;
+  for (const [pid, pp] of panes) {
+    pp.el.classList.remove("visible-side", "focused");
+    pp.el.style.order = "";
+    let vis = false;
+    if (on) {
+      vis = pid === L || pid === R;
+      if (vis) {
+        pp.el.classList.add("visible-side");
+        pp.el.style.order = pid === L ? 0 : 1; // DOM order ≠ side order
+      }
+      if (pid === activeId) pp.el.classList.add("focused");
+    } else vis = pid === activeId;
+    pp.el.classList.toggle("hidden", !vis);
+  }
+}
+function focusSide(id) { // mousedown inside a split pane moves focus (and activeId) to it
+  if (!splitId || id === activeId) return;
+  splitFocus = id === rightPaneId() ? "right" : "left";
+  const t = activeId; activeId = splitId; splitId = t; // swap: focused ↔ unfocused
+  renderTabs(); renderSessions(); layoutPanes();
+}
+function fitVisible() { // fit + resize-send every visible pane
+  const ids = splitId ? [leftPaneId(), rightPaneId()] : [activeId];
+  for (const vid of ids) {
+    const p = vid && panes.get(vid);
+    if (p && !p.el.classList.contains("hidden")) sendSize(vid, p);
+  }
+}
+function toggleSplit() {
+  if (splitId) {
+    splitId = null; splitFocus = "left";
+    layoutPanes();
+    requestAnimationFrame(fitVisible);
+    const p = panes.get(activeId); if (p) p.term.focus();
+    return;
+  }
+  const next = sessInView().find((s) => s.id !== activeId);
+  if (!activeId || !next) return toast("Need 2 sessions to split", "err");
+  splitId = next.id; splitFocus = "left";
+  const sp = ensurePane(splitId);
+  if (wsAlive && !sp.attached) attach(splitId, sp);
+  layoutPanes();
+  requestAnimationFrame(fitVisible);
+  const p = panes.get(activeId); if (p) p.term.focus();
+}
 function select(id) {
   const s = sessions.find((x) => x.id === id);
   if (!s) return;
+  if (splitId && id === splitId) { // picked the session already on the other side → just move focus
+    splitFocus = splitFocus === "left" ? "right" : "left";
+    const t = activeId; activeId = splitId; splitId = t;
+    clearNotify(id); unreadSess.delete(id);
+    renderTabs(); renderSessions(); layoutPanes();
+    const fp = panes.get(id); if (fp) fp.term.focus();
+    return;
+  }
   activeId = id;
+  clearNotify(id);
+  unreadSess.delete(id);
   if (mqNarrow.matches && sideVisible) { sideVisible = false; applyToggles(); } // auto-close drawer on narrow screens
   const p = ensurePane(id);
-  for (const [pid, pp] of panes) pp.el.classList.toggle("hidden", pid !== id);
+  layoutPanes();
   p.term.clear();
   if (wsAlive) attach(id, p);
   renderTabs(); renderSessions(); updateEmpty();
@@ -211,11 +318,13 @@ function closeSession(id) {
   send({ type: "kill", id });
   const p = panes.get(id);
   if (p) { p.term.dispose(); p.el.remove(); panes.delete(id); }
+  unreadSess.delete(id);
+  if (splitId === id) { splitId = null; splitFocus = "left"; } // killed the split side → single view
   if (activeId === id) {
     activeId = null;
     const rest = sessInView().filter((s) => s.id !== id);
-    if (rest.length) select(rest[0].id); else updateEmpty();
-  }
+    if (rest.length) select(rest[0].id); else { updateEmpty(); layoutPanes(); }
+  } else layoutPanes();
 }
 function renameSession(id) {
   const s = sessions.find((x) => x.id === id);
@@ -235,15 +344,27 @@ function renameSession(id) {
 }
 
 // ---------- rendering ----------
+// git status cache (30s TTL) — shared by ws cards and the files-panel diff btn
+const gitCache = new Map();
+function gitInfo(base) {
+  const c = gitCache.get(base);
+  if (c && Date.now() - c.t < 30000) return Promise.resolve(c.v);
+  return fetch(`/api/git?base=${encodeURIComponent(base)}`)
+    .then((r) => r.json()).then((v) => { gitCache.set(base, { t: Date.now(), v }); return v; })
+    .catch(() => null);
+}
+const pinsLoad = () => { try { return new Set(JSON.parse(localStorage.getItem("rd.pins") || "[]")); } catch { return new Set(); } };
+const pinsSave = (s) => { try { localStorage.setItem("rd.pins", JSON.stringify([...s])); } catch {} };
 function renderAll() {
-  renderSessions(); renderTabs(); renderHome(); updateEmpty();
+  renderSessions(); renderTabs(); renderHome(); updateEmpty(); layoutPanes();
 }
 function renderSessions() {
   sessListEl.innerHTML = "";
   for (const s of sessInView()) {
+    const p = panes.get(s.id);
     const d = document.createElement("div");
-    d.className = "sess-item" + (s.id === activeId ? " active" : "") + (s.exited ? " exited" : "");
-    d.innerHTML = `<span class="sess-dot"></span><span class="sess-txt"><span class="sess-name">${esc(s.name)}</span><span class="sess-cwd">${esc(shortPath(s.cwd))}</span></span>`;
+    d.className = "sess-item" + (s.id === activeId ? " active" : "") + (s.exited ? " exited" : "") + (unreadSess.has(s.id) ? " unread" : "");
+    d.innerHTML = `<span class="sess-dot"></span><span class="sess-txt"><span class="sess-name">${esc(s.name)}</span><span class="sess-cwd">${esc(shortPath(s.cwd))}</span></span><span class="sess-time">${relTime(p && p.lastOutAt)}</span>`;
     d.onclick = () => select(s.id);
     sessListEl.appendChild(d);
   }
@@ -252,10 +373,13 @@ function renderTabs() {
   tabsEl.innerHTML = "";
   for (const s of sessInView()) {
     if (!panes.has(s.id)) continue;
+    const p = panes.get(s.id);
+    const ttl = (p && p.title ? p.title : "").slice(0, 24);
     const t = document.createElement("div");
-    t.className = "tab" + (s.id === activeId ? " active" : "") + (s.exited ? " exited" : "");
+    t.className = "tab" + (s.id === activeId ? " active" : "") + (s.exited ? " exited" : "") + (notifiedSess.has(s.id) ? " bell" : "") + (unreadSess.has(s.id) ? " unread" : "");
     t.dataset.id = s.id;
-    t.innerHTML = `<span>${esc(s.name)}</span><span class="tab-x" title="kill">×</span>`;
+    t.title = p && p.title ? p.title : s.name;
+    t.innerHTML = `<span>${esc(s.name)}</span>${ttl ? `<span class="tab-ttl">${esc(ttl)}</span>` : ""}<span class="tab-x" title="kill">×</span>`;
     t.onclick = (e) => { if (e.target.classList.contains("tab-x")) closeSession(s.id); else select(s.id); };
     t.ondblclick = () => renameSession(s.id);
     tabsEl.appendChild(t);
@@ -264,23 +388,47 @@ function renderTabs() {
 function renderHome() {
   // workspace cards
   wsGridEl.innerHTML = "";
-  const sorted = [...workspaces].sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0));
+  const pinSet = pinsLoad();
+  const sorted = [...workspaces].sort((a, b) =>
+    (pinSet.has(b.id) - pinSet.has(a.id)) || (b.lastUsed || 0) - (a.lastUsed || 0));
   for (const w of sorted) {
     const n = sessions.filter((s) => s.workspace === w.id && !s.exited).length;
+    const pinned = pinSet.has(w.id);
     const d = document.createElement("div");
     d.className = "ws-card";
-    d.innerHTML = `<div class="ws-card-ico">${folderSvg(34)}</div>
+    d.innerHTML = `<div class="ws-acts${pinned ? " pinon" : ""}">
+        <span class="ws-act ws-pin${pinned ? " on" : ""}" title="${pinned ? "Unpin" : "Pin"}">📌</span>
+        <span class="ws-act ws-ren" title="Rename">✎</span>
+        <span class="ws-x" title="Remove">×</span>
+      </div>
+      <div class="ws-card-ico">${folderSvg(34)}</div>
       <div class="ws-card-name">${esc(w.name)}</div>
       <div class="ws-card-path">${esc(w.path)}</div>
-      <div class="ws-card-meta">${n ? `${n} live session${n > 1 ? "s" : ""}` : "idle"}</div>
-      <span class="ws-x" title="Remove">×</span>`;
+      <div class="ws-card-meta">${n ? `${n} live session${n > 1 ? "s" : ""}` : "idle"}</div>`;
     d.onclick = (e) => {
-      if (e.target.classList.contains("ws-x")) {
-        fetch(`/api/workspaces/${w.id}`, { method: "DELETE" })
-          .then((r) => { if (r.ok) { toast(`Removed workspace “${w.name}”`); loadWorkspaces(); } });
-      } else enterWorkspace(w.id);
+      if (e.target.closest(".ws-acts")) {
+        if (e.target.classList.contains("ws-pin")) {
+          const s = pinsLoad();
+          if (s.has(w.id)) s.delete(w.id); else s.add(w.id);
+          pinsSave(s); renderHome();
+        } else if (e.target.classList.contains("ws-ren")) renameWs(w, d);
+        else if (e.target.classList.contains("ws-x")) {
+          fetch(`/api/workspaces/${w.id}`, { method: "DELETE" })
+            .then((r) => { if (r.ok) { toast(`Removed workspace “${w.name}”`); loadWorkspaces(); } });
+        }
+        return; // actions never enter the workspace
+      }
+      enterWorkspace(w.id);
     };
     wsGridEl.appendChild(d);
+    gitInfo(`ws:${w.id}`).then((g) => { // lazily patch repo status into the card
+      if (!g || !g.isRepo || !d.isConnected) return;
+      const gl = document.createElement("div");
+      gl.className = "ws-git";
+      gl.textContent = `⎇ ${g.branch || "detached"} · ${g.changed ? `${g.changed} changed` : "clean"}`;
+      const meta = d.querySelector(".ws-card-meta");
+      if (meta) meta.after(gl);
+    });
   }
   const add = document.createElement("div");
   add.className = "ws-card ws-add";
@@ -310,6 +458,84 @@ function renderHome() {
     homeSessEl.appendChild(d);
   }
 }
+function renameWs(w, card) { // inline rename, same pattern as renameSession
+  const nameEl = card.querySelector(".ws-card-name");
+  if (!nameEl) return;
+  const inp = document.createElement("input");
+  inp.className = "ws-rename"; inp.value = w.name;
+  nameEl.replaceWith(inp);
+  inp.focus(); inp.select();
+  inp.onclick = (e) => e.stopPropagation();
+  const done = (commit) => {
+    const v = inp.value.trim();
+    if (commit && v && v !== w.name)
+      return fetch(`/api/workspaces/${w.id}`, { method: "PATCH", body: JSON.stringify({ name: v }) })
+        .then(async (r) => {
+          if (r.ok) { toast(`Renamed to “${v}”`); loadWorkspaces(); }
+          else { toast("Rename failed", "err"); renderHome(); }
+        })
+        .catch(() => { toast("Rename failed", "err"); renderHome(); });
+    renderHome();
+  };
+  inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") done(true); if (e.key === "Escape") done(false); };
+  inp.onblur = () => done(true);
+}
+
+// ---------- home: machines (tailnet peers) ----------
+async function renderMachines() {
+  const sec = $("#peers-sec"), box = $("#home-peers");
+  const j = await fetch("/api/peers").then((r) => r.json()).catch(() => null);
+  const peers = (j && j.peers) || [];
+  if (!peers.length) { sec.classList.add("hidden"); return; }
+  sec.classList.remove("hidden");
+  box.innerHTML = "";
+  for (const p of peers) {
+    const d = document.createElement("div");
+    d.className = "peer-row" + (p.online ? "" : " off");
+    const tag = !p.online ? "offline" : p.direct ? "direct" : p.relay ? `relay ${p.relay}` : "—";
+    d.innerHTML = `<span class="peer-dot${p.online ? " on" : ""}"></span>
+      <span class="peer-name">${esc(p.hostname || "?")}${p.self ? ` <span class="peer-self">(this machine)</span>` : ""}</span>
+      <span class="peer-os">${esc(p.os || "")}</span>
+      <span class="peer-tag">${esc(tag)}</span>
+      ${p.sremote ? `<span class="peer-sr">S-remote ✓</span>` : ""}`;
+    if (!p.self && p.sremote && p.ip) { // peer runs S-remote → click opens its UI
+      d.classList.add("link");
+      d.title = `http://${p.ip}:2209`;
+      d.onclick = () => window.open(`http://${p.ip}:2209`, "_blank");
+    }
+    box.appendChild(d);
+  }
+}
+
+// ---------- home: dev servers (listening ports) ----------
+const DEV_SKIP_PROC = new Set(["System", "svchost.exe", "services.exe", "lsass.exe", "spoolsv.exe", "wininit.exe", "Idle", "Registry"]);
+const DEV_SKIP_PORT = new Set([135, 139, 445, 3389]);
+async function renderDevports() {
+  const sec = $("#dev-sec"), box = $("#home-dev");
+  const j = await fetch("/api/devports").then((r) => r.json()).catch(() => null);
+  const ports = ((j && j.ports) || []).filter((p) =>
+    !DEV_SKIP_PORT.has(p.port) && !(p.proc && DEV_SKIP_PROC.has(p.proc)));
+  if (!ports.length) { sec.classList.add("hidden"); return; }
+  sec.classList.remove("hidden");
+  box.innerHTML = "";
+  const tip = hostInfo.tailscaleIp || location.hostname;
+  for (const p of ports) {
+    const d = document.createElement("div");
+    d.className = "dev-row" + (p.loopback ? " loop" : "");
+    d.innerHTML = `<span class="dev-proc">${esc(p.proc || "?")}</span>
+      <span class="dev-port">:${p.port}</span>
+      <span class="dev-addr">${esc(p.addr)}</span>
+      ${p.loopback
+        ? `<span class="dev-warn" title="localhost-only — restart with --host to reach via Tailscale">⚠ localhost-only</span>`
+        : `<span class="dev-go">↗</span>`}`;
+    if (!p.loopback) {
+      d.classList.add("link");
+      d.title = `http://${tip}:${p.port}`;
+      d.onclick = () => window.open(`http://${tip}:${p.port}`, "_blank");
+    }
+    box.appendChild(d);
+  }
+}
 function updateEmpty() {
   emptyEl.classList.toggle("hidden", !!activeId && panes.has(activeId));
 }
@@ -331,8 +557,7 @@ function applyToggles() {
   $("#scrim").classList.toggle("show", mqNarrow.matches && (sideVisible || fpVisible));
   applyWidths();
   if (fpVisible && fpRoot) fpNavigate(fpPath);
-  const p = panes.get(activeId);
-  if (p) requestAnimationFrame(() => sendSize(activeId, p));
+  requestAnimationFrame(fitVisible);
 }
 $("#side-collapse").onclick = () => { sideVisible = false; localStorage.setItem("rd.sidebar", "0"); applyToggles(); };
 $("#rail-open").onclick = () => { sideVisible = true; localStorage.setItem("rd.sidebar", "1"); applyToggles(); };
@@ -362,8 +587,7 @@ function makeResizable(handle, panel, min, max, key, fromRight) {
       document.body.classList.remove("dragging");
       document.removeEventListener("mousemove", move);
       document.removeEventListener("mouseup", up);
-      const p = panes.get(activeId);
-      if (p && activeId) sendSize(activeId, p);
+      fitVisible();
     };
     document.addEventListener("mousemove", move);
     document.addEventListener("mouseup", up);
@@ -374,12 +598,33 @@ makeResizable($("#rs-files"), filesPanel, 190, 480, "rd.w.files", true);
 
 // ---------- mobile keybar (Esc/Tab/Ctrl/arrows…) ----------
 let ctrlLatch = false, altLatch = false;
-const KEYBAR = [
-  { l: "Esc", d: "\x1b" }, { l: "Tab", d: "\t" }, { l: "Ctrl", mod: "ctrl" }, { l: "Alt", mod: "alt" },
-  { l: "←", d: "\x1b[D" }, { l: "↓", d: "\x1b[B" }, { l: "↑", d: "\x1b[A" }, { l: "→", d: "\x1b[C" },
-  { l: "|", d: "|" }, { l: "~", d: "~" }, { l: "-", d: "-" }, { l: "/", d: "/" },
-  { l: "C-c", d: "\x03" }, { l: "C-z", d: "\x1a" }, { l: "C-d", d: "\x04" }, { l: "C-l", d: "\x0c" },
+// key catalog — config = array of ids in localStorage["rd.keybar.v1"]
+const KB_KEYS = [
+  { id: "esc", l: "Esc", d: "\x1b" }, { id: "tab", l: "Tab", d: "\t" },
+  { id: "ctrl", l: "Ctrl", mod: "ctrl" }, { id: "alt", l: "Alt", mod: "alt" },
+  { id: "left", l: "←", d: "\x1b[D" }, { id: "down", l: "↓", d: "\x1b[B" },
+  { id: "up", l: "↑", d: "\x1b[A" }, { id: "right", l: "→", d: "\x1b[C" },
+  { id: "pipe", l: "|", d: "|" }, { id: "tilde", l: "~", d: "~" },
+  { id: "dash", l: "-", d: "-" }, { id: "slash", l: "/", d: "/" },
+  { id: "c-c", l: "C-c", d: "\x03" }, { id: "c-z", l: "C-z", d: "\x1a" },
+  { id: "c-d", l: "C-d", d: "\x04" }, { id: "c-l", l: "C-l", d: "\x0c" },
+  { id: "pgup", l: "PgUp", d: "\x1b[5~" }, { id: "pgdn", l: "PgDn", d: "\x1b[6~" },
+  { id: "home", l: "Home", d: "\x1b[H" }, { id: "end", l: "End", d: "\x1b[F" },
+  { id: "del", l: "Del", d: "\x1b[3~" }, { id: "ins", l: "Ins", d: "\x1b[2~" },
+  { id: "c-a", l: "C-a", d: "\x01" }, { id: "c-e", l: "C-e", d: "\x05" },
+  { id: "c-u", l: "C-u", d: "\x15" }, { id: "c-k", l: "C-k", d: "\x0b" },
+  { id: "c-w", l: "C-w", d: "\x17" },
+  { id: "f1", l: "F1", d: "\x1bOP" }, { id: "f2", l: "F2", d: "\x1bOQ" },
+  { id: "f3", l: "F3", d: "\x1bOR" }, { id: "f4", l: "F4", d: "\x1bOS" },
 ];
+const KB_DEFAULT = ["esc", "tab", "ctrl", "alt", "left", "down", "up", "right", "pipe", "tilde", "dash", "slash", "c-c", "c-z", "c-d", "c-l"];
+function kbConfig() {
+  try {
+    const a = JSON.parse(localStorage.getItem("rd.keybar.v1") || "null");
+    if (Array.isArray(a)) return a;
+  } catch {}
+  return KB_DEFAULT;
+}
 function sendKey(def) {
   if (!activeId) return;
   let data = def.d;
@@ -395,14 +640,18 @@ function syncLatch() {
     b.classList.toggle("latched", (b.dataset.mod === "ctrl" && ctrlLatch) || (b.dataset.mod === "alt" && altLatch));
   });
 }
-(function buildKeybar() {
+function rebuildKeybar() { // global — settings UI calls this after editing rd.keybar.v1
   const kb = $("#keybar");
-  for (const k of KEYBAR) {
+  kb.innerHTML = "";
+  const byId = {};
+  for (const k of KB_KEYS) byId[k.id] = k;
+  for (const k of kbConfig().map((id) => byId[id]).filter(Boolean)) {
     const b = document.createElement("button");
     b.className = "kb-key" + (k.mod ? " kb-mod" : "");
     b.textContent = k.l;
     if (k.mod) b.dataset.mod = k.mod;
     b.addEventListener("click", () => {
+      reqNotifPerm();
       const ae = document.activeElement;
       if (ae && ae.blur) ae.blur(); // hide soft keyboard — keybar replaces it
       if (k.mod === "ctrl") { ctrlLatch = !ctrlLatch; syncLatch(); return; }
@@ -411,41 +660,265 @@ function syncLatch() {
     });
     kb.appendChild(b);
   }
-})();
+  const cp = document.createElement("button"); // copy-buffer key — always last, not configurable
+  cp.className = "kb-key"; cp.textContent = "⧉"; cp.title = "Copy buffer";
+  cp.addEventListener("click", () => { reqNotifPerm(); openCopy(); });
+  kb.appendChild(cp);
+  syncLatch();
+}
+rebuildKeybar();
 
 // ---------- type row (buffered input → terminal) ----------
-const typer = $("#typer");
+const typer = $("#typer"), typerProgEl = $("#typer-prog");
+const typerHist = { list: [], i: -1, draft: "" }; // i=-1 → not navigating
+try { typerHist.list = JSON.parse(localStorage.getItem("rd.typer.hist") || "[]"); } catch {}
+function histPush(v) {
+  if (!v) return;
+  if (typerHist.list[typerHist.list.length - 1] !== v) typerHist.list.push(v); // dedupe consecutive
+  if (typerHist.list.length > 100) typerHist.list.splice(0, typerHist.list.length - 100);
+  try { localStorage.setItem("rd.typer.hist", JSON.stringify(typerHist.list)); } catch {}
+  typerHist.i = -1; typerHist.draft = "";
+}
+function typerGrow() { // auto-grow up to ~40% of viewport
+  typer.style.height = "auto";
+  typer.style.height = Math.min(typer.scrollHeight, Math.round(innerHeight * 0.4)) + "px";
+}
+function histRecall(dir) { // dir -1 = older (ArrowUp), +1 = newer/draft (ArrowDown)
+  const n = typerHist.list.length;
+  if (!n) return;
+  if (typerHist.i === -1) {
+    if (dir === 1) return;
+    typerHist.draft = typer.value; typerHist.i = n - 1;
+  } else typerHist.i = Math.max(0, typerHist.i + dir);
+  if (typerHist.i >= n) { typerHist.i = -1; typer.value = typerHist.draft; }
+  else typer.value = typerHist.list[typerHist.i];
+  typerGrow();
+  const c = dir === -1 ? 0 : typer.value.length; // park caret on the recall edge so nav continues on multi-line entries
+  typer.selectionStart = typer.selectionEnd = c;
+}
 function typerSend(withEnter) {
   const v = typer.value;
   if (!activeId) return;
-  if (v) send({ type: "in", id: activeId, data: v + (withEnter ? "\r" : "") });
+  const p = panes.get(activeId);
+  if (v.includes("\n") && p) {
+    p.term.paste(v); // bracketed-paste aware
+    if (withEnter) send({ type: "in", id: activeId, data: "\r" });
+  } else if (v) send({ type: "in", id: activeId, data: v + (withEnter ? "\r" : "") });
   else if (withEnter) send({ type: "in", id: activeId, data: "\r" });
+  histPush(v);
   typer.value = "";
+  typerGrow();
   typer.focus();
 }
 $("#typer-send").onclick = () => typerSend(true);
-$("#typer-raw").onclick = () => typerSend(false);
+$("#typer-raw").onclick = () => typerSend(false); // raw: never a trailing \r
+typer.addEventListener("input", typerGrow);
 typer.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") { e.preventDefault(); typerSend(true); }
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); typerSend(true); } // Shift+Enter = literal newline
+  else if (e.key === "ArrowUp" && typer.value.slice(0, typer.selectionStart).indexOf("\n") === -1) { e.preventDefault(); histRecall(-1); }
+  else if (e.key === "ArrowDown" && typer.value.slice(typer.selectionEnd).indexOf("\n") === -1) { e.preventDefault(); histRecall(1); }
   e.stopPropagation(); // don't hit global shortcuts while typing
 });
-// attach file → upload into workspace's temp-upload/ → path into input
-$("#typer-attach").onclick = () => $("#attach-file").click();
-$("#attach-file").addEventListener("change", async (e) => {
-  const f = e.target.files[0]; e.target.value = "";
-  if (!f) return;
+$("#typerow").addEventListener("click", reqNotifPerm); // lazy Notification permission ask on user tap
+
+// ---------- upload (attach / camera / paste / drop → temp-upload) ----------
+function typerProg(frac) {
+  if (!typerProgEl) return;
+  typerProgEl.classList.toggle("on", frac > 0);
+  typerProgEl.firstElementChild.style.width = Math.round(frac * 100) + "%";
+}
+function uploadFile(f, putPath, dir = "temp-upload") {
+  return new Promise((resolve) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `/api/upload?base=${encodeURIComponent(fpRoot)}&name=${encodeURIComponent(f.name || "pasted-" + Date.now() + ".png")}&dir=${encodeURIComponent(dir)}`);
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) typerProg(e.loaded / e.total); };
+    xhr.onload = () => {
+      typerProg(0);
+      let j = null; try { j = JSON.parse(xhr.responseText); } catch {}
+      if (xhr.status >= 200 && xhr.status < 300 && j) {
+        if (putPath) { // absolute path into typer for the LAST file only
+          const p = /\s/.test(j.path) ? `"${j.path}"` : j.path;
+          typer.value = typer.value && !typer.value.endsWith(" ") ? `${typer.value} ${p}` : typer.value + p;
+          typerGrow(); typer.focus();
+        }
+        toast(`Attached → ${j.rel}`);
+        if (fpVisible && fpRoot) fpNavigate(fpPath);
+      } else toast("Upload failed: " + (j?.error || xhr.status), "err");
+      resolve();
+    };
+    xhr.onerror = () => { typerProg(0); toast("Upload failed", "err"); resolve(); };
+    typerProg(0.01);
+    xhr.send(f);
+  });
+}
+let attachDir = "temp-upload"; // fp-upload retargets the picker to fpPath; consumed on change
+async function uploadFiles(files, dir = "temp-upload") { // sequential
+  if (!files.length) return;
   if (!fpRoot) return toast("Open a workspace or session first", "err");
-  try {
-    const r = await fetch(`/api/upload?base=${encodeURIComponent(fpRoot)}&name=${encodeURIComponent(f.name)}`, { method: "POST", body: f });
-    const j = await r.json().catch(() => null);
-    if (!r.ok || !j) return toast("Upload failed: " + (j?.error || r.status), "err");
-    const p = /\s/.test(j.path) ? `"${j.path}"` : j.path;
-    typer.value = typer.value && !typer.value.endsWith(" ") ? `${typer.value} ${p}` : typer.value + p;
-    typer.focus();
-    toast(`Attached → ${j.rel}`);
-    if (fpVisible && fpRoot) fpNavigate(fpPath);
-  } catch { toast("Upload failed", "err"); }
+  for (let i = 0; i < files.length; i++) await uploadFile(files[i], i === files.length - 1, dir);
+}
+$("#typer-attach").onclick = () => { attachDir = "temp-upload"; $("#attach-file").click(); };
+$("#typer-cam").onclick = () => $("#attach-cam").click();
+$("#attach-file").addEventListener("change", (e) => {
+  const fs = [...e.target.files]; e.target.value = "";
+  const dir = attachDir; attachDir = "temp-upload";
+  uploadFiles(fs, dir);
 });
+$("#attach-cam").addEventListener("change", (e) => { const fs = [...e.target.files]; e.target.value = ""; uploadFiles(fs); });
+document.addEventListener("paste", (e) => { // screenshot paste → upload
+  const fs = [...(e.clipboardData?.files || [])];
+  if (fs.length) { e.preventDefault(); uploadFiles(fs); }
+});
+
+// ---------- snippets ----------
+const snipModal = $("#snip-modal");
+const snipKey = () => `rd.snip.${currentWs || "standalone"}`;
+const snipLoad = () => { try { return JSON.parse(localStorage.getItem(snipKey()) || "[]"); } catch { return []; } };
+const snipSave = (l) => { try { localStorage.setItem(snipKey(), JSON.stringify(l)); } catch {} };
+function renderSnips() {
+  const el = $("#snip-list");
+  el.innerHTML = "";
+  const list = snipLoad();
+  if (!list.length) el.innerHTML = `<div class="snip-none">No snippets yet — type something, then “Save current”.</div>`;
+  list.forEach((s, i) => {
+    const d = document.createElement("div");
+    d.className = "snip-item";
+    d.innerHTML = `<span class="snip-txt">${esc(s)}</span><span class="snip-x" title="Delete">×</span>`;
+    d.onclick = (e) => {
+      if (e.target.classList.contains("snip-x")) {
+        const l = snipLoad(); l.splice(i, 1); snipSave(l); renderSnips();
+      } else {
+        typer.value = typer.value && !typer.value.endsWith(" ") ? `${typer.value} ${s}` : typer.value + s;
+        snipModal.classList.add("hidden");
+        typerGrow(); typer.focus();
+      }
+    };
+    el.appendChild(d);
+  });
+}
+$("#typer-snip").onclick = () => { renderSnips(); snipModal.classList.remove("hidden"); };
+$("#snip-save").onclick = () => {
+  const v = typer.value.trim();
+  if (!v) return toast("Type something first", "err");
+  const l = snipLoad(); l.push(v); snipSave(l);
+  renderSnips(); toast("Snippet saved");
+};
+$("#snip-close").onclick = () => snipModal.classList.add("hidden");
+snipModal.onclick = (e) => e.target === snipModal && snipModal.classList.add("hidden");
+
+// ---------- notifications (bell / idle) ----------
+const notifiedSess = new Set(); // sessions with an unread notification (drives .tab.bell)
+const BASE_TITLE = document.title;
+let notifAsked = false;
+function reqNotifPerm() { // one-time, lazily from a user gesture
+  if (notifAsked || !("Notification" in window) || Notification.permission !== "default") return;
+  notifAsked = true;
+  try { Notification.requestPermission(); } catch {}
+}
+function notifySession(id, reason) {
+  notifiedSess.add(id);
+  const t = tabsEl.querySelector(`[data-id="${id}"]`);
+  if (t) t.classList.add("bell");
+  document.title = "● S-remote";
+  try { navigator.vibrate?.(150); } catch {}
+  const sess = sessions.find((s) => s.id === id);
+  const body = reason === "bell" ? "Process signaled attention" : "Session idle after output";
+  if (document.visibilityState === "visible") toast(`${sess ? sess.name : id}: ${body}`);
+  if ("Notification" in window && Notification.permission === "granted") {
+    try { new Notification(`S-remote — ${sess ? sess.name : id}`, { body, icon: "/logo.svg" }); } catch {}
+  }
+}
+function clearNotify(id) {
+  notifiedSess.delete(id);
+  const t = tabsEl.querySelector(`[data-id="${id}"]`);
+  if (t) t.classList.remove("bell");
+  if (!notifiedSess.size) document.title = BASE_TITLE;
+}
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") document.title = BASE_TITLE; });
+window.addEventListener("focus", () => { document.title = BASE_TITLE; });
+setInterval(() => { // idle detect: produced output then quiet ≥15s → notify once per busy→quiet edge
+  const now = Date.now();
+  for (const [id, p] of panes) {
+    if (!p.lastOutAt || p.idleNotified || now - p.lastOutAt < 15000) continue;
+    const s = sessions.find((x) => x.id === id);
+    if (!s || s.exited) continue;
+    if (id === activeId && document.visibilityState === "visible") continue;
+    p.idleNotified = true;
+    notifySession(id, "idle");
+  }
+}, 5000);
+
+// ---------- copy mode (mobile can't select xterm text) ----------
+const copyModal = $("#copy-modal"), copyText = $("#copy-text");
+function openCopy() {
+  const p = panes.get(activeId);
+  if (!p) return toast("No active session", "err");
+  const buf = p.term.buffer.active, lines = [];
+  for (let i = 0; i < buf.length; i++) {
+    lines.push(typeof buf.translateBufferLineToString === "function"
+      ? buf.translateBufferLineToString(i, true)
+      : (buf.getLine(i) ? buf.getLine(i).translateToString(true) : ""));
+  }
+  while (lines.length && !lines[lines.length - 1].trim()) lines.pop(); // trim trailing blanks
+  copyText.value = lines.join("\n");
+  copyModal.classList.remove("hidden");
+}
+$("#copy-ok").onclick = async () => {
+  try {
+    if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(copyText.value);
+    else { copyText.select(); document.execCommand("copy"); }
+    toast("Buffer copied");
+    copyModal.classList.add("hidden");
+  } catch { toast("Copy failed", "err"); }
+};
+$("#copy-cancel").onclick = () => copyModal.classList.add("hidden");
+copyModal.onclick = (e) => e.target === copyModal && copyModal.classList.add("hidden");
+
+// ---------- drag & drop upload ----------
+const dropzone = $("#dropzone"), mainEl = $("#main");
+let dragDepth = 0;
+const canDrop = () => view === "work" && !!fpRoot;
+const fileDrag = (e) => { const t = e.dataTransfer && e.dataTransfer.types; return t && (t.includes ? t.includes("Files") : t.contains("Files")); };
+mainEl.addEventListener("dragenter", (e) => {
+  if (!fileDrag(e)) return;
+  e.preventDefault();
+  if (canDrop()) { dragDepth++; dropzone.classList.add("show"); }
+});
+mainEl.addEventListener("dragover", (e) => {
+  if (!fileDrag(e)) return;
+  e.preventDefault(); // required to allow drop
+  if (canDrop()) { e.dataTransfer.dropEffect = "copy"; dropzone.classList.add("show"); }
+});
+mainEl.addEventListener("dragleave", () => {
+  if (--dragDepth <= 0) { dragDepth = 0; dropzone.classList.remove("show"); }
+});
+mainEl.addEventListener("drop", (e) => {
+  e.preventDefault(); // never navigate the app to a dropped file
+  dragDepth = 0; dropzone.classList.remove("show");
+  if (!canDrop()) return;
+  const fs = [...(e.dataTransfer?.files || [])];
+  if (fs.length) uploadFiles(fs);
+});
+
+// ---------- swipe to switch session ----------
+let swipeX = null, swipeY = 0, swipeT = 0;
+termsEl.addEventListener("touchstart", (e) => {
+  if (e.touches.length !== 1) { swipeX = null; return; }
+  const t = e.touches[0];
+  swipeX = t.clientX; swipeY = t.clientY; swipeT = Date.now();
+}, { passive: true });
+termsEl.addEventListener("touchend", (e) => {
+  if (swipeX === null) return;
+  const t = e.changedTouches[0];
+  const dx = t.clientX - swipeX, dy = t.clientY - swipeY, dt = Date.now() - swipeT;
+  swipeX = null;
+  if (Math.abs(dx) <= 70 || Math.abs(dy) >= 45 || dt >= 600) return;
+  const list = sessInView();
+  if (list.length < 2) return;
+  const i = Math.max(0, list.findIndex((s) => s.id === activeId));
+  const nxt = list[(i + (dx < 0 ? 1 : list.length - 1)) % list.length]; // left → next, right → prev
+  if (nxt) select(nxt.id);
+}, { passive: true });
 
 // ---------- scrim (mobile drawers) ----------
 $("#scrim").onclick = () => {
@@ -457,7 +930,8 @@ $("#scrim").onclick = () => {
 // ---------- keyboard shortcuts ----------
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
-    for (const m of ["#new-modal", "#picker", "#file-modal"]) $(m).classList.add("hidden");
+    for (const m of ["#new-modal", "#picker", "#file-modal", "#snip-modal", "#copy-modal", "#settings-modal", "#palette", "#diff-modal"]) $(m).classList.add("hidden");
+    closeTermSearch();
     return;
   }
   if (!e.ctrlKey || e.shiftKey || e.altKey) return;
@@ -473,8 +947,183 @@ document.addEventListener("keydown", (e) => {
     if (view !== "work") return;
     openModal();
     e.preventDefault();
+  } else if (e.key === "k" || e.key === "K") { // Ctrl+K command palette (home + work)
+    e.preventDefault();
+    if ($("#palette").classList.contains("hidden")) openPalette(); else closePalette();
+  } else if (e.key === "f" || e.key === "F") { // Ctrl+F terminal search
+    if (view !== "work") return;
+    e.preventDefault();
+    openTermSearch();
   }
 });
+
+// ---------- command palette (Ctrl+K) ----------
+const palette = $("#palette"), palIn = $("#pal-in"), palList = $("#pal-list");
+let palAll = [], palIdx = 0, palShown = [];
+function palItems() {
+  const items = [];
+  for (const s of sessions) {
+    const w = s.workspace ? wsById(s.workspace) : null;
+    items.push({ kind: "TERM", label: s.name + (s.exited ? " (exited)" : ""), sub: `${w ? w.name : "standalone"} · ${shortPath(s.cwd)}`,
+      run: () => { enterWorkspace(s.workspace || null); setTimeout(() => select(s.id), 0); } });
+  }
+  for (const w of workspaces)
+    items.push({ kind: "WS", label: w.name, sub: w.path, run: () => enterWorkspace(w.id) });
+  items.push(
+    { kind: "ACT", label: "New terminal", sub: "open the create dialog", run: () => openModal() },
+    { kind: "ACT", label: "Toggle files panel", sub: "Ctrl+J", run: () => $("#files-toggle").click() },
+    { kind: "ACT", label: "Toggle sidebar", sub: "Ctrl+B", run: () => { sideVisible = !sideVisible; localStorage.setItem("rd.sidebar", sideVisible ? "1" : "0"); applyToggles(); } },
+    { kind: "ACT", label: "Go home", sub: "workspace picker", run: () => goHome() },
+    { kind: "ACT", label: "Copy mode", sub: "copy terminal buffer", run: () => openCopy() },
+    { kind: "ACT", label: "Search in terminal", sub: "Ctrl+F", run: () => setTimeout(openTermSearch, 0) },
+    { kind: "ACT", label: "Split terminal", sub: "two sessions side by side", run: () => toggleSplit() },
+    { kind: "ACT", label: "Settings", sub: "font, theme, shell, keybar", run: () => openSettings() },
+  );
+  return items;
+}
+function palScore(it, q) { // startsWith > word-start > contains
+  const L = it.label.toLowerCase(), S = it.sub.toLowerCase();
+  if (L.startsWith(q)) return 3;
+  if (L.includes(" " + q) || L.includes("-" + q) || L.includes("_" + q)) return 2;
+  if (L.includes(q)) return 1;
+  if (S.includes(q)) return 0.5;
+  return -1;
+}
+function palRender() {
+  const q = palIn.value.trim().toLowerCase();
+  palShown = palAll.map((it) => ({ it, s: q ? palScore(it, q) : 0 }))
+    .filter((x) => x.s >= 0)
+    .sort((a, b) => b.s - a.s)
+    .map((x) => x.it);
+  palIdx = Math.min(palIdx, Math.max(0, palShown.length - 1));
+  palList.innerHTML = "";
+  palShown.forEach((it, i) => {
+    const d = document.createElement("div");
+    d.className = "pal-item" + (i === palIdx ? " sel" : "");
+    d.innerHTML = `<span class="pal-kind">${it.kind}</span><span class="pal-txt"><span class="pal-name">${esc(it.label)}</span><span class="pal-sub">${esc(it.sub)}</span></span>`;
+    d.onclick = () => { closePalette(); it.run(); };
+    d.onmousemove = () => { if (palIdx !== i) { palIdx = i; palSync(); } };
+    palList.appendChild(d);
+  });
+  if (!palShown.length) palList.innerHTML = `<div class="pal-none">No matches</div>`;
+}
+function palSync() {
+  palList.querySelectorAll(".pal-item").forEach((d, i) => d.classList.toggle("sel", i === palIdx));
+  const sel = palList.children[palIdx];
+  if (sel && sel.scrollIntoView) sel.scrollIntoView({ block: "nearest" });
+}
+function openPalette() {
+  palAll = palItems(); palIdx = 0; palIn.value = "";
+  palRender();
+  palette.classList.remove("hidden");
+  palIn.focus();
+}
+function closePalette() { palette.classList.add("hidden"); }
+palIn.addEventListener("input", () => { palIdx = 0; palRender(); });
+palIn.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown") { e.preventDefault(); palIdx = Math.min(palIdx + 1, palShown.length - 1); palSync(); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); palIdx = Math.max(palIdx - 1, 0); palSync(); }
+  else if (e.key === "Enter") { e.preventDefault(); const it = palShown[palIdx]; if (it) { closePalette(); it.run(); } }
+  else if (e.key === "Escape") { e.preventDefault(); closePalette(); }
+  e.stopPropagation();
+});
+palette.onclick = (e) => e.target === palette && closePalette();
+$("#pal-btn").onclick = openPalette;
+
+// ---------- terminal search (Ctrl+F) ----------
+const termSearch = $("#term-search"), tsIn = $("#ts-in");
+function openTermSearch() {
+  if (view !== "work" || !activeId) return;
+  termSearch.classList.remove("hidden");
+  tsIn.focus(); tsIn.select();
+}
+function closeTermSearch() {
+  if (termSearch.classList.contains("hidden")) return;
+  termSearch.classList.add("hidden");
+  for (const p of panes.values()) if (p.search) { try { p.search.clearDecorations(); } catch {} }
+  const p = panes.get(activeId); if (p) p.term.focus();
+}
+function tsFind(next) {
+  const p = panes.get(activeId), q = tsIn.value;
+  if (!p || !p.search || !q) return;
+  const opts = { decorations: { matchBackground: "#3a5a80", matchOverviewRuler: "#5aa9ff", activeMatchBackground: "#5aa9ff", activeMatchColorOverviewRuler: "#ffffff" } };
+  try { next ? p.search.findNext(q, opts) : p.search.findPrevious(q, opts); } catch {}
+}
+tsIn.addEventListener("input", () => tsFind(true));
+tsIn.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); tsFind(!e.shiftKey); }
+  else if (e.key === "Escape") { e.preventDefault(); closeTermSearch(); }
+  e.stopPropagation();
+});
+$("#ts-next").onclick = () => tsFind(true);
+$("#ts-prev").onclick = () => tsFind(false);
+$("#ts-x").onclick = closeTermSearch;
+
+// ---------- settings modal ----------
+const setModal = $("#settings-modal");
+function applyTermTheme() { for (const p of panes.values()) { try { p.term.options.theme = { ...TERM_THEMES[themeName] }; } catch {} } }
+function applyTheme() {
+  document.body.classList.toggle("light", themeName === "light");
+  applyTermTheme();
+}
+function setFont(n) {
+  fontSize = Math.min(22, Math.max(10, n));
+  localStorage.setItem("rd.font", String(fontSize));
+  $("#set-font-n").textContent = fontSize;
+  for (const p of panes.values()) { try { p.term.options.fontSize = fontSize; } catch {} }
+  requestAnimationFrame(fitVisible);
+}
+function renderSetKeys() { // checkbox per KB_KEYS entry → rd.keybar.v1 (KB_KEYS order) → rebuildKeybar()
+  const el = $("#set-keys");
+  el.innerHTML = "";
+  const cfg = new Set(kbConfig());
+  for (const k of KB_KEYS) {
+    const lab = document.createElement("label");
+    lab.className = "set-key";
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.checked = cfg.has(k.id);
+    cb.onchange = () => {
+      const cur = new Set(kbConfig());
+      if (cb.checked) cur.add(k.id); else cur.delete(k.id);
+      localStorage.setItem("rd.keybar.v1", JSON.stringify(KB_KEYS.filter((x) => cur.has(x.id)).map((x) => x.id)));
+      rebuildKeybar();
+    };
+    lab.appendChild(cb);
+    lab.appendChild(document.createTextNode(k.l));
+    el.appendChild(lab);
+  }
+}
+function openSettings() {
+  $("#set-font-n").textContent = fontSize;
+  for (const b of setModal.querySelectorAll("#set-theme button")) b.classList.toggle("on", b.dataset.v === themeName);
+  const ss = $("#set-shell"), saved = localStorage.getItem("rd.shell") || "";
+  ss.value = [...ss.options].some((o) => o.value === saved) ? saved : (ss.options[0] ? ss.options[0].value : "");
+  renderSetKeys();
+  setModal.classList.remove("hidden");
+}
+$("#set-btn").onclick = openSettings;
+$("#side-set").onclick = openSettings;
+$("#set-close").onclick = () => setModal.classList.add("hidden");
+setModal.onclick = (e) => e.target === setModal && setModal.classList.add("hidden");
+$("#set-font-m").onclick = () => setFont(fontSize - 1);
+$("#set-font-p").onclick = () => setFont(fontSize + 1);
+for (const b of document.querySelectorAll("#set-theme button")) {
+  b.onclick = () => {
+    themeName = b.dataset.v;
+    localStorage.setItem("rd.theme", themeName);
+    applyTheme();
+    for (const x of document.querySelectorAll("#set-theme button")) x.classList.toggle("on", x === b);
+  };
+}
+$("#set-shell").onchange = (e) => localStorage.setItem("rd.shell", e.target.value);
+$("#set-reset").onclick = () => {
+  for (const k of ["rd.w.side", "rd.w.files", "rd.sidebar", "rd.files"]) localStorage.removeItem(k);
+  sidebar.style.width = ""; filesPanel.style.width = "";
+  sideVisible = true; fpVisible = true;
+  applyToggles();
+  toast("Layout reset");
+};
+$("#split-btn").onclick = toggleSplit;
 
 // ---------- files panel ----------
 let fpRoot = null, fpPath = "";
@@ -518,39 +1167,177 @@ async function fpNavigate(rel) {
     d.className = "fp-item" + (it.dir ? " dir" : "");
     d.innerHTML = `<span class="fp-ico">${it.dir ? folderSvg(15) : fileSvg()}</span>
       <span class="fp-name" title="${esc(it.name)}">${esc(it.name)}</span>
+      <span class="fp-acts">${it.dir ? "" : `<span class="fp-ins" title="Insert path into prompt">⎘</span>`}<span class="fp-act fp-ren" title="Rename">✎</span><span class="fp-act fp-del" title="Delete">🗑</span></span>
       <span class="fp-size">${it.dir ? "" : fmtSize(it.size)}</span>`;
     const rel = j.path ? j.path + "/" + it.name : it.name;
+    const ins = d.querySelector(".fp-ins");
+    if (ins) ins.onclick = (e) => { e.stopPropagation(); insertPath(rel); };
+    d.querySelector(".fp-ren").onclick = (e) => { e.stopPropagation(); fpRename(rel, it); };
+    d.querySelector(".fp-del").onclick = (e) => { e.stopPropagation(); fpDelete(rel, it); };
     if (it.dir) d.onclick = () => fpNavigate(rel);
-    else d.onclick = () => openFile(rel, it);
+    else {
+      // long-press (~500ms) on touch = insert path; normal tap = preview
+      let lp = false, lpT = null;
+      d.addEventListener("touchstart", () => {
+        lp = false; clearTimeout(lpT);
+        lpT = setTimeout(() => { lp = true; lpT = null; try { navigator.vibrate?.(20); } catch {} insertPath(rel); }, 500);
+      }, { passive: true });
+      for (const ev of ["touchend", "touchmove", "touchcancel"])
+        d.addEventListener(ev, () => { if (lpT) { clearTimeout(lpT); lpT = null; } }, { passive: true });
+      d.onclick = () => { if (lp) { lp = false; return; } openFile(rel, it); };
+    }
     fpList.appendChild(d);
   }
   if (!j.items.length && j.parent === null) fpList.innerHTML = `<div class="fp-err">Empty folder</div>`;
+  const dBtn = $("#fp-diff"); // show only when the current root is a git repo
+  gitInfo(fpRoot).then((g) => dBtn.classList.toggle("hidden", !(g && g.isRepo)));
+}
+function fpAbsPath(rel) { // absolute host path for a path inside fpRoot
+  let base = fpRoot;
+  if (base && base.startsWith("ws:")) { const w = wsById(base.slice(3)); base = w ? w.path : null; }
+  if (!base) return null;
+  base = base.replace(/[\\/]+$/, "");
+  let p = rel ? base + "/" + rel.replace(/\\/g, "/") : base;
+  if (/[:\\]/.test(base)) p = p.replace(/\//g, "\\"); // Windows-style root → backslashes
+  return p;
+}
+function insertPath(rel) {
+  const abs = fpAbsPath(rel);
+  if (!abs) return toast("No workspace path", "err");
+  const p = /\s/.test(abs) ? `"${abs}"` : abs;
+  typer.value = typer.value && !typer.value.endsWith(" ") ? `${typer.value} ${p}` : typer.value + p;
+  typerGrow(); // files panel stays open; don't steal focus
+  toast("Path inserted");
+}
+async function fpOp(op, rel, name) {
+  const r = await fetch("/api/fileop", { method: "POST", body: JSON.stringify({ base: fpRoot, op, path: rel, name }) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { toast(j.error || `${op} failed`, "err"); return false; }
+  return true;
+}
+async function fpRename(rel, it) {
+  const nn = prompt("Rename to:", it.name);
+  if (nn && nn.trim() && nn.trim() !== it.name && await fpOp("rename", rel, nn.trim())) {
+    toast("Renamed"); fpNavigate(fpPath);
+  }
+}
+async function fpDelete(rel, it) {
+  if (!confirm(`Delete “${it.name}”${it.dir ? " and everything inside" : ""}?`)) return;
+  if (await fpOp("delete", rel)) { toast("Deleted"); fpNavigate(fpPath); }
 }
 $("#fp-refresh").onclick = () => fpNavigate(fpPath);
+$("#fp-newfile").onclick = async () => { // empty file in the current folder via /api/upload
+  if (!fpRoot) return toast("No base folder", "err");
+  const name = prompt("New file name:");
+  if (!name || !name.trim()) return;
+  const r = await fetch(`/api/upload?base=${encodeURIComponent(fpRoot)}&dir=${encodeURIComponent(fpPath || ".")}&name=${encodeURIComponent(name.trim())}`, { method: "POST" });
+  const j = await r.json().catch(() => ({}));
+  if (r.ok) { toast(`Created ${name.trim()}`); fpNavigate(fpPath); }
+  else toast(j.error || "create failed", "err");
+};
+$("#fp-newdir").onclick = async () => {
+  const parent = fpAbsPath(fpPath);
+  if (!parent) return toast("No base folder", "err");
+  const name = prompt("New folder name:");
+  if (!name || !name.trim()) return;
+  const r = await fetch("/api/mkdir", { method: "POST", body: JSON.stringify({ parent, name: name.trim() }) });
+  const j = await r.json().catch(() => ({}));
+  if (r.ok) { toast(`Created ${name.trim()}/`); fpNavigate(fpPath); }
+  else toast(j.error || "mkdir failed", "err");
+};
+$("#fp-upload").onclick = () => { attachDir = fpPath || "."; $("#attach-file").click(); };
 
 // ---------- file preview ----------
 const fileModal = $("#file-modal");
+const IMG_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "bmp", "avif"]);
+// tiny markdown renderer — escape first, then fences/inline/headers/lists
+function mdLite(src) {
+  const inline = (t) => esc(t)
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+    .replace(/\*([^*]+)\*/g, "<i>$1</i>")
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  let html = "", inCode = false, inList = false, para = [];
+  const flushPara = () => { if (para.length) { html += "<p>" + para.map(inline).join("<br>") + "</p>"; para = []; } };
+  const flushList = () => { if (inList) { html += "</ul>"; inList = false; } };
+  for (const ln of src.split(/\r?\n/)) {
+    if (/^```/.test(ln)) {
+      if (inCode) { html += "</code></pre>"; inCode = false; }
+      else { flushPara(); flushList(); html += "<pre><code>"; inCode = true; }
+      continue;
+    }
+    if (inCode) { html += esc(ln) + "\n"; continue; }
+    const h = /^(#{1,4})\s+(.*)$/.exec(ln);
+    if (h) { flushPara(); flushList(); html += `<h${h[1].length}>${inline(h[2])}</h${h[1].length}>`; continue; }
+    const li = /^\s*[-*]\s+(.*)$/.exec(ln);
+    if (li) { flushPara(); if (!inList) { html += "<ul>"; inList = true; } html += "<li>" + inline(li[1]) + "</li>"; continue; }
+    if (!ln.trim()) { flushPara(); flushList(); continue; }
+    para.push(ln);
+  }
+  flushPara(); flushList();
+  if (inCode) html += "</code></pre>";
+  return html || '<p class="md-dim">(empty file)</p>';
+}
 async function openFile(rel, it) {
   const url = `/api/file?base=${encodeURIComponent(fpRoot)}&path=${encodeURIComponent(rel)}`;
   $("#file-name").textContent = it.name;
   const dl = $("#file-dl");
   dl.href = url + "&dl=1";
   dl.download = it.name;
-  $("#file-body").textContent = "loading…";
+  const preEl = $("#file-body"), imgEl = $("#file-img"), mdEl = $("#file-body-html");
+  for (const el of [preEl, imgEl, mdEl]) el.classList.add("hidden");
   fileModal.classList.remove("hidden");
+  const ext = (it.name.includes(".") ? it.name.split(".").pop() : "").toLowerCase();
+  if (IMG_EXT.has(ext)) { imgEl.src = url; imgEl.alt = it.name; imgEl.classList.remove("hidden"); return; }
+  if (ext === "md" || ext === "markdown") {
+    mdEl.innerHTML = "loading…"; mdEl.classList.remove("hidden");
+    try {
+      const r = await fetch(url + "&head=1");
+      mdEl.innerHTML = r.ok ? mdLite(await r.text()) : "Failed to load";
+    } catch (e) { mdEl.textContent = "Failed to load: " + e.message; }
+    return;
+  }
+  preEl.textContent = "loading…"; preEl.classList.remove("hidden");
   try {
     const r = await fetch(url + "&head=1");
     const size = Number(r.headers.get("X-File-Size") || it.size);
     const buf = await r.arrayBuffer();
     const text = new TextDecoder("utf-8", { fatal: false }).decode(buf);
     const printable = !/[\x00-\x08\x0E-\x1F]/.test(text.slice(0, 4000));
-    $("#file-body").textContent = printable
+    preEl.textContent = printable
       ? text + (size > buf.byteLength ? `\n\n… truncated (${fmtSize(size)} total — use Download)` : "")
       : `Binary file — ${fmtSize(size)}. Use Download.`;
-  } catch (e) { $("#file-body").textContent = "Failed to load: " + e.message; }
+  } catch (e) { preEl.textContent = "Failed to load: " + e.message; }
 }
 $("#file-close").onclick = () => fileModal.classList.add("hidden");
 fileModal.onclick = (e) => e.target === fileModal && fileModal.classList.add("hidden");
+
+// ---------- git diff viewer ----------
+const diffModal = $("#diff-modal");
+async function openDiff() {
+  if (!fpRoot) return;
+  diffModal.classList.remove("hidden");
+  $("#diff-title").textContent = `git diff — ${shortPath(fpAbsPath("") || fpRoot)}`;
+  $("#diff-stat").textContent = "loading…";
+  $("#diff-body").innerHTML = "";
+  const r = await fetch(`/api/gitdiff?base=${encodeURIComponent(fpRoot)}`).catch(() => null);
+  const j = r ? await r.json().catch(() => null) : null;
+  if (!r || !r.ok || !j) { $("#diff-stat").textContent = (j && j.error) || "failed"; return; }
+  $("#diff-stat").textContent =
+    ((j.stat || "").trim() || "(clean working tree)") + (j.truncated ? "\n… diff truncated at 256 KB" : "");
+  $("#diff-body").innerHTML = j.diff ? j.diff.split("\n").map((ln) => {
+    let c = "";
+    if (ln.startsWith("+++") || ln.startsWith("---") || ln.startsWith("diff ") || ln.startsWith("index ")) c = "dl-meta";
+    else if (ln.startsWith("+")) c = "dl-add";
+    else if (ln.startsWith("-")) c = "dl-del";
+    else if (ln.startsWith("@@")) c = "dl-hunk";
+    return `<span${c ? ` class="${c}"` : ""}>${esc(ln) || " "}</span>`;
+  }).join("\n") : `<span class="dl-meta">no changes</span>`;
+}
+$("#fp-diff").onclick = openDiff;
+$("#diff-refresh").onclick = openDiff;
+$("#diff-close").onclick = () => diffModal.classList.add("hidden");
+diffModal.onclick = (e) => e.target === diffModal && diffModal.classList.add("hidden");
 
 // ---------- folder picker (Win11 style) ----------
 const picker = $("#picker"), pkMain = $("#pk-main"), pkCrumbs = $("#pk-crumbs"),
@@ -666,6 +1453,8 @@ function openModal() {
   modal.classList.remove("hidden");
   cwdIn.value = w ? w.path : (hostInfo.home || "");
   cwdIn.disabled = !!w;
+  const ds = localStorage.getItem("rd.shell");
+  if (ds && [...shellSel.options].some((o) => o.value === ds)) shellSel.value = ds;
   nameIn.value = "";
   nameIn.placeholder = w ? w.name : "(optional)";
   nameIn.focus();
@@ -691,20 +1480,22 @@ $("#new-ok").onclick = () => {
   hostInfo = info;
   $("#host-info").textContent = `${info.hostname || "?"} · ${info.tailscaleIp || location.hostname}`;
   for (const sh of info.shells || ["powershell"]) {
-    const o = document.createElement("option");
-    o.value = o.textContent = sh;
-    shellSel.appendChild(o);
+    for (const sel of [shellSel, $("#set-shell")]) {
+      const o = document.createElement("option");
+      o.value = o.textContent = sh;
+      sel.appendChild(o);
+    }
   }
+  applyTheme();
   loadWorkspaces();
+  renderMachines(); renderDevports(); // initial home view — showView() isn't called at boot
   applyToggles();
   connect();
-  new ResizeObserver(() => {
-    const p = panes.get(activeId);
-    if (p && activeId) sendSize(activeId, p);
-  }).observe(termsEl);
+  setInterval(() => { if (view === "work") renderSessions(); }, 30000); // keep sess-time fresh
+  if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+  new ResizeObserver(() => fitVisible()).observe(termsEl);
   // iOS Safari: soft keyboard shrinks visual viewport without firing layout resize
   if (window.visualViewport) visualViewport.addEventListener("resize", () => {
-    const p = panes.get(activeId);
-    if (p && activeId) requestAnimationFrame(() => sendSize(activeId, p));
+    requestAnimationFrame(fitVisible);
   });
 })();
