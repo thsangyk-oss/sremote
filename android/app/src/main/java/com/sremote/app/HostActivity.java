@@ -1,0 +1,362 @@
+package com.sremote.app;
+
+import android.app.Activity;
+import android.app.DownloadManager;
+import android.content.ActivityNotFoundException;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.Environment;
+import android.provider.MediaStore;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.webkit.DownloadListener;
+import android.webkit.MimeTypeMap;
+import android.webkit.URLUtil;
+import android.webkit.ValueCallback;
+import android.webkit.WebChromeClient;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
+import android.widget.Button;
+import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import java.io.File;
+import java.util.ArrayList;
+import java.util.List;
+
+/** Full-screen S-remote UI: a hardened WebView onto http://host:2209 */
+public class HostActivity extends Activity {
+    public static final String EXTRA_HOST_ID = "host_id";
+    public static final String EXTRA_NAME = "name";
+    public static final String EXTRA_URL = "url";
+
+    private static final int REQ_FILE = 77;
+
+    private WebView web;
+    private View errView, root;
+    private TextView errDetail;
+    private String url, name;
+    private ValueCallback<Uri[]> fileCb;
+    private Uri cameraUri;
+    private int lastKb = 0;
+
+    private int dp(float v) { return (int) (v * getResources().getDisplayMetrics().density + .5f); }
+    private int col(int res) { return getColor(res); }
+
+    @Override protected void onCreate(Bundle b) {
+        super.onCreate(b);
+        url = getIntent().getStringExtra(EXTRA_URL);
+        name = getIntent().getStringExtra(EXTRA_NAME);
+        if (url == null) { finish(); return; }
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(col(R.color.bg));
+
+        // toolbar
+        LinearLayout bar = new LinearLayout(this);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setPadding(dp(6), dp(6), dp(6), dp(6));
+        bar.setBackgroundColor(col(R.color.panel));
+        TextView back = new TextView(this);
+        back.setText("‹"); back.setTextSize(26); back.setTextColor(col(R.color.fg));
+        back.setPadding(dp(10), 0, dp(10), 0);
+        back.setOnClickListener(v -> finish());
+        bar.addView(back);
+
+        LinearLayout tc = new LinearLayout(this);
+        tc.setOrientation(LinearLayout.VERTICAL);
+        TextView t = new TextView(this); t.setText(name); t.setTextSize(15);
+        t.setTextColor(col(R.color.fg)); t.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        TextView u = new TextView(this); u.setText(url.replaceFirst("^[a-z]+://", ""));
+        u.setTextSize(11); u.setTextColor(col(R.color.dim));
+        tc.addView(t); tc.addView(u);
+        bar.addView(tc, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
+        TextView reload = new TextView(this);
+        reload.setText("⟳"); reload.setTextSize(22); reload.setTextColor(col(R.color.fg));
+        reload.setPadding(dp(12), 0, dp(10), 0);
+        reload.setOnClickListener(v -> { errView.setVisibility(View.GONE); web.reload(); });
+        bar.addView(reload);
+        root.addView(bar);
+
+        // content: webview + error overlay
+        FrameLayout fl = new FrameLayout(this);
+        web = new WebView(this);
+        fl.addView(web);
+
+        LinearLayout err = new LinearLayout(this);
+        err.setOrientation(LinearLayout.VERTICAL);
+        err.setGravity(Gravity.CENTER);
+        err.setPadding(dp(30), 0, dp(30), 0);
+        err.setBackgroundColor(col(R.color.bg));
+        TextView eh = new TextView(this); eh.setText("Can't reach host");
+        eh.setTextSize(18); eh.setTextColor(col(R.color.fg));
+        eh.setTypeface(Typeface.DEFAULT, Typeface.BOLD); eh.setGravity(Gravity.CENTER);
+        errDetail = new TextView(this); errDetail.setTextSize(13);
+        errDetail.setTextColor(col(R.color.dim)); errDetail.setGravity(Gravity.CENTER);
+        errDetail.setPadding(0, dp(8), 0, dp(16));
+        Button retry = new Button(this); retry.setText("Retry");
+        GradientDrawable g = new GradientDrawable();
+        g.setColor(col(R.color.accent)); g.setCornerRadius(dp(9));
+        retry.setBackground(g); retry.setTextColor(col(R.color.bg));
+        retry.setOnClickListener(v -> { errView.setVisibility(View.GONE); web.loadUrl(url); });
+        err.addView(eh); err.addView(errDetail); err.addView(retry);
+        errView = err;
+        errView.setVisibility(View.GONE);
+        fl.addView(errView);
+        root.addView(fl, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+        setContentView(root);
+        this.root = root;
+
+        // soft keyboard: slide the whole frame up by the IME height — a translate,
+        // so the WebView (and the terminal) never resizes/repaints. IME insets are
+        // dispatched to the window on API 30+ even under adjustNothing; on older
+        // APIs fall back to the visible-display-frame trick.
+        final View decor = getWindow().getDecorView();
+        if (Build.VERSION.SDK_INT >= 30) {
+            decor.setOnApplyWindowInsetsListener((v, ins) -> {
+                int kb = ins.isVisible(android.view.WindowInsets.Type.ime())
+                        ? ins.getInsets(android.view.WindowInsets.Type.ime()).bottom : 0;
+                setKbShift(kb);
+                return v.onApplyWindowInsets(ins);
+            });
+        } else {
+            root.getViewTreeObserver().addOnGlobalLayoutListener(() -> {
+                android.graphics.Rect r = new android.graphics.Rect();
+                decor.getWindowVisibleDisplayFrame(r);
+                int gap = decor.getHeight() - r.bottom; // IME (+nav) stealing the bottom
+                setKbShift(gap > dp(160) ? gap : 0);    // nav bar alone is < ~60dp
+            });
+        }
+
+        setupWeb();
+        web.loadUrl(url);
+    }
+
+    private void setKbShift(int kb) {
+        if (kb == lastKb) return;
+        lastKb = kb;
+        root.setTranslationY(-kb);
+        // tell the page the native layer owns the shift, so its own keyboard
+        // handling doesn't translate the body a second time
+        if (web != null) web.evaluateJavascript("window.__nativeKb=" + kb, null);
+    }
+
+    private void setupWeb() {
+        WebSettings s = web.getSettings();
+        s.setJavaScriptEnabled(true);
+        s.setDomStorageEnabled(true);
+        s.setDatabaseEnabled(true);
+        s.setAllowFileAccess(true);
+        s.setAllowContentAccess(true);
+        s.setMediaPlaybackRequiresUserGesture(false);
+        s.setBuiltInZoomControls(false);
+        // let the web UI know it's inside the app: the native layer slides the
+        // frame up for the keyboard — the page must not translate itself too
+        s.setUserAgentString(s.getUserAgentString() + " SRemoteApp");
+        WebView.setWebContentsDebuggingEnabled(false);
+
+        web.setWebViewClient(new WebViewClient() {
+            @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
+                Uri u = r.getUrl();
+                String target = u.toString();
+                // S-remote download links — grab them before the WebView navigates
+                if (target.startsWith(url) && target.contains("dl=1")) {
+                    startDownload(target, null, null);
+                    return true;
+                }
+                if (target.startsWith(url) || u.getHost() == null
+                        || target.startsWith(u.getScheme() + "://" + u.getHost() + ":" + u.getPort())) {
+                    return false; // keep S-remote UI inside
+                }
+                if ("http".equals(u.getScheme()) || "https".equals(u.getScheme())
+                        || "market".equals(u.getScheme())) {
+                    try { startActivity(new Intent(Intent.ACTION_VIEW, u)); } catch (ActivityNotFoundException ignored) {}
+                }
+                return true;
+            }
+
+            @Override public void onReceivedError(WebView v, WebResourceRequest r,
+                                                android.webkit.WebResourceError e) {
+                if (r.isForMainFrame()) {
+                    errDetail.setText(e != null ? String.valueOf(e.getDescription()) : "offline");
+                    errView.setVisibility(View.VISIBLE);
+                }
+            }
+
+            @Override public void onPageStarted(WebView v, String u, android.graphics.Bitmap f) {
+                errView.setVisibility(View.GONE);
+            }
+
+            @Override public void onPageFinished(WebView v, String u) {
+                if (lastKb > 0) v.evaluateJavascript("window.__nativeKb=" + lastKb, null);
+            }
+        });
+
+        web.setWebChromeClient(new WebChromeClient() {
+            @Override public boolean onShowFileChooser(WebView w, ValueCallback<Uri[]> cb,
+                                                       FileChooserParams p) {
+                if (fileCb != null) { fileCb.onReceiveValue(null); fileCb = null; }
+                fileCb = cb;
+                openPicker(p);
+                return true;
+            }
+        });
+
+        web.setDownloadListener(downloadListener);
+    }
+
+    // ---------- file picker (+ camera capture for "Take photo") ----------
+    private void openPicker(WebChromeClient.FileChooserParams p) {
+        List<Intent> extra = new ArrayList<>();
+        boolean wantsCapture = p.isCaptureEnabled();
+        String[] accepts = p.getAcceptTypes();
+        boolean acceptsImage = accepts.length == 0
+                || String.join(" ", accepts).contains("image");
+        if ((wantsCapture || acceptsImage)
+                && getPackageManager().hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)) {
+            Intent cam = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+            if (cam.resolveActivity(getPackageManager()) != null) {
+                File dir = new File(getCacheDir(), "cam");
+                //noinspection ResultOfMethodCallIgnored
+                dir.mkdirs();
+                File f = new File(dir, "shot-" + System.currentTimeMillis() + ".jpg");
+                cameraUri = MiniFileProvider.uri(this, f);
+                cam.putExtra(MediaStore.EXTRA_OUTPUT, cameraUri);
+                cam.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                        | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                for (ResolveInfo ri : getPackageManager()
+                        .queryIntentActivities(cam, PackageManager.MATCH_ALL)) {
+                    grantUriPermission(ri.activityInfo.packageName, cameraUri,
+                            Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                }
+                extra.add(cam);
+            }
+        }
+
+        Intent content;
+        try { content = p.createIntent(); }
+        catch (Exception e) {
+            content = new Intent(Intent.ACTION_GET_CONTENT)
+                    .addCategory(Intent.CATEGORY_OPENABLE).setType("*/*");
+        }
+        Intent chooser = Intent.createChooser(content, "Attach file");
+        chooser.putExtra(Intent.EXTRA_INITIAL_INTENTS, extra.toArray(new Intent[0]));
+        try { startActivityForResult(chooser, REQ_FILE); }
+        catch (ActivityNotFoundException e) {
+            fileCb.onReceiveValue(null); fileCb = null;
+            Toast.makeText(this, "No file picker", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    @Override protected void onActivityResult(int req, int res, Intent data) {
+        if (req != REQ_FILE) { super.onActivityResult(req, res, data); return; }
+        if (fileCb == null) return;
+        Uri[] out = null;
+        if (res == RESULT_OK) {
+            if (data == null || (data.getData() == null && data.getClipData() == null)) {
+                if (cameraUri != null) out = new Uri[]{cameraUri}; // camera wrote to provider uri
+            } else if (data.getClipData() != null) {
+                int n = data.getClipData().getItemCount();
+                out = new Uri[n];
+                for (int i = 0; i < n; i++) out[i] = data.getClipData().getItemAt(i).getUri();
+            } else {
+                out = new Uri[]{data.getData()};
+            }
+        }
+        fileCb.onReceiveValue(out);
+        fileCb = null;
+        cameraUri = null;
+    }
+
+    // ---------- downloads → Downloads/ ----------
+    /** real filename: S-remote passes it in ?path= (basename) or Content-Disposition */
+    private static String fileNameFor(String u, String cd, String mime) {
+        try {
+            Uri uri = Uri.parse(u);
+            for (String key : new String[]{"path", "name", "file", "filename"}) {
+                String v = uri.getQueryParameter(key);
+                if (v != null && !v.isEmpty()) {
+                    int s = Math.max(v.lastIndexOf('/'), v.lastIndexOf('\\'));
+                    String n = v.substring(s + 1).trim();
+                    if (!n.isEmpty()) return n;
+                }
+            }
+        } catch (Exception ignored) {}
+        if (cd != null) {
+            for (String part : cd.split(";")) {
+                part = part.trim();
+                if (part.regionMatches(true, 0, "filename*=", 0, 10)) {
+                    String v = part.substring(10);
+                    int q = v.lastIndexOf('\'');
+                    if (q >= 0 && q + 1 < v.length()) v = v.substring(q + 1);
+                    try { v = Uri.decode(v); } catch (Exception ignored) {}
+                    if (!v.isEmpty()) return v;
+                }
+            }
+            for (String part : cd.split(";")) {
+                part = part.trim();
+                if (part.regionMatches(true, 0, "filename=", 0, 9)) {
+                    String v = part.substring(9).replaceAll("^\"|\"$", "").trim();
+                    if (!v.isEmpty()) return v;
+                }
+            }
+        }
+        String g = URLUtil.guessFileName(u, cd, mime);
+        return g == null || g.isEmpty() ? "download.bin" : g;
+    }
+
+    private void startDownload(String u, String cd, String mime) {
+        try {
+            String fn = fileNameFor(u, cd, mime);
+            DownloadManager.Request r = new DownloadManager.Request(Uri.parse(u));
+            r.setTitle(fn);
+            r.setDescription("S-remote");
+            r.setMimeType(mime != null ? mime
+                    : MimeTypeMap.getSingleton().getMimeTypeFromExtension(
+                            MimeTypeMap.getFileExtensionFromUrl(u)));
+            r.setNotificationVisibility(
+                    DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+            r.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fn);
+            getSystemService(DownloadManager.class).enqueue(r);
+            Toast.makeText(this, "Downloading " + fn, Toast.LENGTH_SHORT).show();
+        } catch (Exception e) {
+            Toast.makeText(this, "Download failed: " + e.getMessage(), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private final DownloadListener downloadListener =
+            (u, ua, cd, mime, len) -> startDownload(u, cd, mime);
+
+    @Override protected void onNewIntent(Intent i) {
+        super.onNewIntent(i);
+        String u = i.getStringExtra(EXTRA_URL);
+        if (u != null && !u.equals(url)) {
+            url = u; name = i.getStringExtra(EXTRA_NAME);
+            errView.setVisibility(View.GONE);
+            web.loadUrl(url);
+        }
+    }
+
+    @Override public void onBackPressed() {
+        if (web != null && web.canGoBack()) web.goBack();
+        else super.onBackPressed();
+    }
+
+    @Override protected void onDestroy() {
+        if (web != null) web.destroy();
+        super.onDestroy();
+    }
+}

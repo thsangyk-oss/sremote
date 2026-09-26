@@ -7,3 +7,10 @@ server.log
 *.zip
 .DS_Store
 Thumbs.db
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/keystore/
+android/keystore.properties
+*.apk

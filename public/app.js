@@ -115,7 +115,7 @@ function connect() {
             const t = tabsEl.querySelector(`[data-id="${m.id}"]`);
             if (t) t.classList.add("unread");
           }
-          if (m.data.includes("\x07") || m.data.includes("\x1b]9;") || m.data.includes("\x1b]777;")) notifySession(m.id, "bell");
+          if (hasAttentionSeq(m.data)) notifySession(m.id, "bell");
         }
         break;
       }
@@ -213,6 +213,18 @@ function ensurePane(id) {
   if (window.WebLinksAddon) { try { term.loadAddon(new WebLinksAddon.WebLinksAddon()); } catch {} }
   if (window.Unicode11Addon) { try { term.loadAddon(new Unicode11Addon.Unicode11Addon()); term.unicode.activeVersion = "11"; } catch {} }
   term.open(el);
+  // mobile: touch lands on .xterm-screen, which covers the real scroller
+  // (.xterm-viewport) — feed drag deltas to scrollTop so scrollback is swipeable
+  const vp = el.querySelector(".xterm-viewport");
+  let tY = null;
+  el.addEventListener("touchstart", (e) => { tY = e.touches.length === 1 ? e.touches[0].clientY : null; }, { passive: true });
+  el.addEventListener("touchmove", (e) => {
+    if (tY == null || e.touches.length !== 1) return;
+    const y = e.touches[0].clientY, dy = tY - y;
+    tY = y;
+    if (vp && dy) vp.scrollTop += dy;
+  }, { passive: true });
+  el.addEventListener("touchend", () => { tY = null; }, { passive: true });
   term.onData((d) => send({ type: "in", id, data: d }));
   term.onResize(({ cols, rows }) => send({ type: "resize", id, cols, rows }));
   term.onTitleChange((t) => { p.title = t; renderTabs(); });
@@ -233,6 +245,9 @@ function attach(id, p) {
 }
 function sendSize(id, p) {
   try { p.fit.fit(); } catch {}
+  // same size → don't send; a no-op PTY resize still repaints the whole viewport
+  if (p.lastCols === p.term.cols && p.lastRows === p.term.rows) return;
+  p.lastCols = p.term.cols; p.lastRows = p.term.rows;
   send({ type: "resize", id, cols: p.term.cols, rows: p.term.rows });
 }
 // split: activeId = focused session, splitId = the OTHER visible one.
@@ -828,15 +843,31 @@ function reqNotifPerm() { // one-time, lazily from a user gesture
   notifAsked = true;
   try { Notification.requestPermission(); } catch {}
 }
+// BEL, OSC 777, or OSC 9 — but NOT OSC 9;4 (taskbar progress, fires constantly)
+function hasAttentionSeq(d) {
+  if (d.includes("\x07") || d.includes("\x1b]777;")) return true;
+  let i = 0;
+  while ((i = d.indexOf("\x1b]9;", i)) !== -1) {
+    if (d.substr(i + 5, 2) !== "4;") return true;
+    i += 5;
+  }
+  return false;
+}
+const notifyAt = new Map(); // "id:reason" -> last toast/Notification ts
 function notifySession(id, reason) {
   notifiedSess.add(id);
   const t = tabsEl.querySelector(`[data-id="${id}"]`);
   if (t) t.classList.add("bell");
   document.title = "● S-remote";
-  try { navigator.vibrate?.(150); } catch {}
   const sess = sessions.find((s) => s.id === id);
   const body = reason === "bell" ? "Process signaled attention" : "Session idle after output";
-  if (document.visibilityState === "visible") toast(`${sess ? sess.name : id}: ${body}`);
+  const visible = document.visibilityState === "visible";
+  if (id === activeId && visible) return; // you're looking at it — the tab dot suffices
+  const key = id + ":" + reason, now = Date.now();
+  if (now - (notifyAt.get(key) || 0) < 60000) return; // max 1/min per session per reason
+  notifyAt.set(key, now);
+  try { navigator.vibrate?.(150); } catch {}
+  if (visible) toast(`${sess ? sess.name : id}: ${body}`);
   if ("Notification" in window && Notification.permission === "granted") {
     try { new Notification(`S-remote — ${sess ? sess.name : id}`, { body, icon: "/logo.svg" }); } catch {}
   }
@@ -1507,8 +1538,35 @@ $("#new-ok").onclick = () => {
   setInterval(() => { if (view === "work") renderSessions(); }, 30000); // keep sess-time fresh
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
   new ResizeObserver(() => fitVisible()).observe(termsEl);
-  // iOS Safari: soft keyboard shrinks visual viewport without firing layout resize
-  if (window.visualViewport) visualViewport.addEventListener("resize", () => {
-    requestAnimationFrame(fitVisible);
-  });
+  // soft keyboard: slide the whole frame up instead of refitting terminals
+  // (no repaint). Sources, whichever reports more: virtualKeyboard API
+  // (Chromium 94+) and visualViewport (Safari/Firefox/older). In the APK the
+  // native layer shifts the frame and sets window.__nativeKb — then we yield.
+  if (window.visualViewport || navigator.virtualKeyboard) {
+    const covered = () => {
+      let c = 0;
+      if (navigator.virtualKeyboard)
+        c = Math.max(c, navigator.virtualKeyboard.boundingRect.height || 0);
+      if (window.visualViewport)
+        c = Math.max(c, innerHeight - visualViewport.height - visualViewport.offsetTop);
+      return c;
+    };
+    const apply = () => {
+      const px = covered();
+      const kb = px > 60;
+      document.body.style.transform = !(window.__nativeKb > 0) && kb
+          ? `translateY(${-px}px)` : "";
+      if (!kb) requestAnimationFrame(fitVisible); // genuine resizes only
+    };
+    if (navigator.virtualKeyboard) {
+      try { navigator.virtualKeyboard.overlaysContent = true; } catch (e) {}
+      navigator.virtualKeyboard.addEventListener("geometrychange", apply);
+    }
+    if (window.visualViewport) {
+      visualViewport.addEventListener("resize", apply);
+      visualViewport.addEventListener("scroll", apply);
+    }
+    addEventListener("focusin", () => setTimeout(apply, 300));
+    addEventListener("focusout", () => setTimeout(apply, 150));
+  }
 })();
