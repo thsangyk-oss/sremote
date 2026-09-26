@@ -302,6 +302,13 @@ body.touch-ui #keybar::-webkit-scrollbar { display: none; }
   .modal-card { width: calc(100vw - 32px); }
   .picker-card { width: 100vw; height: 100dvh; max-width: 100vw; max-height: 100dvh; border-radius: 0; border: 0; }
   .file-card { width: 100vw; height: 100dvh; max-width: 100vw; max-height: 100dvh; border-radius: 0; border: 0; }
+  /* folder picker on phones: slim quick rail + stacked footer so buttons fit */
+  .picker-quick { width: 92px; min-width: 92px; padding: 6px 4px; font-size: 11px; }
+  .picker-main { grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); padding: 8px; }
+  .picker-foot { flex-direction: column; align-items: stretch; padding: 10px 12px; }
+  #pk-selected { width: 100%; }
+  .picker-foot-btns { display: flex; gap: 6px; }
+  .picker-foot-btns > * { flex: 1; }
 }
 @media (max-width: 460px) {
   #ws-grid { grid-template-columns: 1fr; }
