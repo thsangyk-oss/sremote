@@ -392,7 +392,7 @@ const server = http.createServer((req, res) => {
   if (url.pathname === "/api/info") {
     res.writeHead(200, { "Content-Type": "application/json" });
     return res.end(JSON.stringify({
-      hostname: os.hostname(), tailscaleIp: tailscaleIPv4(), home: os.homedir(),
+      hostname: os.hostname(), tailscaleIp: tailscaleIPv4(), home: os.homedir(), root: ROOT,
       platform: os.platform(), shells: Object.keys(SHELLS),
     }));
   }
