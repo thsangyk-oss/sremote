@@ -5,6 +5,7 @@ const $ = (s) => document.querySelector(s);
 
 // ---------- state ----------
 let ws = null, wsAlive = false, reconnectTimer = null;
+let onScreenMsg = () => {}, screenResub = () => {}; // wired inside the init IIFE below
 let sessions = [];          // all server sessions
 let workspaces = [];        // persisted workspace folders
 let activeId = null;
@@ -104,7 +105,7 @@ function connect() {
           const pick = vis[0] || sessInView()[0];
           if (pick) select(pick.id); else { activeId = null; updateEmpty(); renderTabs(); }
         }
-        if (scrOpen) scrSend({ op: "sub", w: scrReqW() }); // re-subscribe after reconnect
+        screenResub(); // re-subscribe screen after reconnect
         break;
       case "out": {
         const p = panes.get(m.id);
@@ -1572,13 +1573,14 @@ $("#new-ok").onclick = () => {
       scrSend({ op: "sub", w: scrReqW() });
     }, 4000);
   };
-  function onScreenMsg(m) {
+  screenResub = () => { if (scrOpen) scrSend({ op: "sub", w: scrReqW() }); };
+  onScreenMsg = (m) => {
     if (m.op === "frame") {
       if (!scrGot) { scrGot = true; clearInterval(scrWatch); }
       scrImg.src = "data:image/jpeg;base64," + m.b64; scrStat.textContent = m.w + "x" + m.h; scrAsk(120);
     } else if (m.op === "err") { scrStat.textContent = m.msg || "error"; scrAsk(1000); }
     else if (!scrGot) scrStat.textContent = (m.op === "info" ? `host ${m.w}x${m.h}, waiting frames…` : "host: " + m.op);
-  }
+  };
   $("#screen-btn").onclick = () => {
     scrModal.classList.remove("hidden"); scrOpen = true;
     scrImg.removeAttribute("src"); scrStat.textContent = "connecting…";
