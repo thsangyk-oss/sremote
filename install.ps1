@@ -75,7 +75,7 @@ $tmp = Join-Path $env:TEMP ("sremote-src-" + [guid]::NewGuid())
 Expand-Archive $zip $tmp -Force
 $src = Get-ChildItem $tmp -Recurse -Filter server.js | Select-Object -First 1 | ForEach-Object { $_.DirectoryName }
 if (-not $src) { throw "server.js not found in downloaded package" }
-foreach ($f in 'server.js','package.json','package-lock.json','install.bat','start.bat','README.md','public') {
+foreach ($f in 'server.js','package.json','package-lock.json','install.bat','start.bat','README.md','public','agent') {
     $p = Join-Path $src $f
     if (Test-Path $p) { Copy-Item $p $dir -Recurse -Force }
 }

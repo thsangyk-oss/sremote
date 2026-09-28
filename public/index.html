@@ -12,7 +12,7 @@
 <meta name="theme-color" content="#0a0d12">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="stylesheet" href="/vendor/xterm.css">
-<link rel="stylesheet" href="/style.css?v=15">
+<link rel="stylesheet" href="/style.css?v=16">
 </head>
 <body>
 
@@ -71,6 +71,7 @@
       <button id="rail-open" class="mini-btn hidden" title="Show panel (Ctrl+B)">☰</button>
       <div id="tabs"></div>
       <button id="pal-btn" class="mini-btn" title="Command palette (Ctrl+K)">🔍</button>
+      <button id="screen-btn" class="mini-btn" title="Remote screen">🖥</button>
       <button id="split-btn" class="mini-btn" title="Split terminal">◫</button>
       <button id="set-btn" class="mini-btn" title="Settings">⚙</button>
       <button id="files-toggle" class="mini-btn on" title="Toggle files (Ctrl+J)">Files</button>
@@ -249,6 +250,26 @@
     <pre id="diff-body"></pre>
   </div>
 </div>
+<div id="screen-modal" class="modal hidden">
+  <div class="screen-card">
+    <div class="screen-head">
+      <span>Screen</span>
+      <span id="scr-stat" class="scr-stat"></span>
+      <span class="scr-spring"></span>
+      <button id="scr-rmb" class="mini-btn" title="Arm right-click for next tap">R-clk</button>
+      <button id="scr-kb" class="mini-btn" title="Keyboard input">⌨</button>
+      <button id="scr-close" class="mini-btn" title="Close">×</button>
+    </div>
+    <div id="scr-stage"><img id="scr-img" draggable="false" alt=""></div>
+    <div id="scr-keys" class="hidden">
+      <input id="scr-type" placeholder="Type text — Enter sends" autocomplete="off" autocapitalize="none" spellcheck="false">
+      <button class="mini-btn scr-k" data-k="{ESC}">Esc</button>
+      <button class="mini-btn scr-k" data-k="{TAB}">Tab</button>
+      <button class="mini-btn scr-k" data-k="^{ESC}" title="Start menu">Win</button>
+      <button id="scr-send" class="btn">Send+⏎</button>
+    </div>
+  </div>
+</div>
 <div id="toasts"></div>
 
 <script src="/vendor/xterm.js"></script>
@@ -256,6 +277,6 @@
 <script src="/vendor/addon-search.js"></script>
 <script src="/vendor/addon-web-links.js"></script>
 <script src="/vendor/addon-unicode11.js"></script>
-<script src="/app.js?v=16"></script>
+<script src="/app.js?v=17"></script>
 </body>
 </html>

@@ -5,7 +5,7 @@ const path = require("path");
 const os = require("os");
 const { WebSocketServer } = require("ws");
 const pty = require("node-pty");
-const { execFile } = require("child_process");
+const { spawn, execFile } = require("child_process");
 
 const PORT = 2209;
 const IS_WIN = process.platform === "win32";
@@ -611,6 +611,47 @@ const server = http.createServer((req, res) => {
   fs.createReadStream(abs).pipe(res);
 });
 
+// ---------- screen share (windows: powershell gdi+ agent, JSONL stdio) ----------
+const SCR_PS1 = path.join(ROOT, "agent", "screen-agent.ps1");
+let scrAgent = null, scrShotBusy = false, scrKillT = null;
+const scrSubs = () => [...(wss ? wss.clients : [])].filter((c) => c._screen && c.readyState === 1);
+function scrStopSoon() {
+  clearTimeout(scrKillT);
+  scrKillT = setTimeout(() => {
+    if (!scrSubs().length && scrAgent) { try { scrAgent.kill(); } catch {} }
+  }, 30000);
+}
+function scrEnsure() {
+  if (scrAgent) return;
+  scrAgent = spawn("powershell.exe",
+    ["-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-File", SCR_PS1],
+    { stdio: ["pipe", "pipe", "ignore"] });
+  let buf = "";
+  scrAgent.stdout.on("data", (d) => {
+    buf += d;
+    let i;
+    while ((i = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+      if (!line) continue;
+      let m; try { m = JSON.parse(line); } catch { continue; }
+      if (m.op === "frame" || m.op === "err" || m.op === "info") scrShotBusy = false;
+      const out = JSON.stringify({ type: "screen", ...m });
+      for (const ws of scrSubs()) ws.send(out);
+    }
+  });
+  scrAgent.on("exit", () => {
+    scrAgent = null; scrShotBusy = false;
+    for (const ws of scrSubs())
+      ws.send(JSON.stringify({ type: "screen", op: "err", msg: "capture agent exited" }));
+  });
+}
+function scrCmd(o) {
+  scrEnsure();
+  if (o.op === "shot") { if (scrShotBusy) return; scrShotBusy = true; }
+  try { scrAgent.stdin.write(JSON.stringify(o) + "\n"); }
+  catch { scrShotBusy = false; }
+}
+
 // ---------- WebSocket ----------
 const wss = new WebSocketServer({ server, path: "/ws" });
 wss.on("connection", (ws, req) => {
@@ -664,6 +705,21 @@ wss.on("connection", (ws, req) => {
       case "list":
         ws.send(JSON.stringify({ type: "sessions", list: sessionList() }));
         break;
+      case "screen": {
+        if (!IS_WIN) {
+          ws.send(JSON.stringify({ type: "screen", op: "err", msg: "screen share is Windows-only" }));
+          break;
+        }
+        const { type, ...cmd } = msg;
+        if (msg.op === "sub") {
+          ws._screen = true; clearTimeout(scrKillT);
+          scrCmd({ op: "info" });
+          scrCmd({ op: "shot", w: msg.w || 1280, q: 55 });
+        } else if (msg.op === "unsub") {
+          ws._screen = false; scrStopSoon();
+        } else scrCmd(cmd);
+        break;
+      }
       case "ping":
         ws.send(JSON.stringify({ type: "pong", t: msg.t }));
         break;
@@ -671,6 +727,7 @@ wss.on("connection", (ws, req) => {
   });
   ws.on("close", () => {
     for (const s of sessions.values()) s.clients.delete(ws);
+    if (ws._screen) { ws._screen = false; scrStopSoon(); }
   });
 });
 

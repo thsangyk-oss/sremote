@@ -81,6 +81,22 @@ with a `KeepAlive` ProgramArguments entry pointing at `server.js`.
   `/usr/bin/zsh`, `/bin/zsh`, `/bin/sh` (and `pwsh` if on PATH); the folder
   picker lists `/` and `~` instead of drives.
 
+## Remote screen (Windows)
+
+The 🖥 button opens a live view of the host desktop. Tap = left click,
+long-press or the **R-clk** button = right click, drag = mouse drag,
+two-finger swipe / wheel = scroll, **⌨** = type text and keys
+(Esc / Tab / Win-menu shortcuts).
+
+Frames are JPEG captures pushed over `/ws` (`type:"screen"`) by a
+PowerShell agent (`agent/screen-agent.ps1`, GDI+ `CopyFromScreen` +
+`SendKeys`/`mouse_event` for input — no dependencies). The agent is
+spawned on first subscriber and killed 30 s after the last one leaves;
+access stays tailnet/localhost-only like everything else. ~5 fps at
+your viewport width is the practical rate — enough to watch and click
+GUI apps, not a video streamer. UAC/secure-desktop prompts can't be
+captured or clicked (Windows security boundary).
+
 ## HTTP API
 
 Base path for file/git endpoints is `base=` — either `ws:<workspace-id>` or an
@@ -102,7 +118,7 @@ absolute directory. All paths are jailed under the base.
 | GET | `/api/devports` | Listening TCP ports + owning process name |
 | GET | `/api/git?base=` | `{isRepo, branch, changed}` for a base dir |
 | GET | `/api/gitdiff?base=` | `{stat, diff, truncated}` vs `HEAD` (diff capped ~256 KB) |
-| WS | `/ws` | Terminal I/O: `attach` / `in` / `out` / `resize` / `create` / `rename` / `kill` |
+| WS | `/ws` | Terminal I/O: `attach` / `in` / `out` / `resize` / `create` / `rename` / `kill`; screen share: `type:"screen"` `sub`/`unsub`/`shot`/`click`/`down`/`up`/`move`/`scroll`/`type`/`key` |
 
 Uploads that land in `<base>/temp-upload/` are added to `.git/info/exclude`
 when the base is a git repo, and files there are swept after 7 days.
@@ -112,7 +128,8 @@ when the base is a git repo, and files there are swept after 7 days.
 | Path | Purpose |
 |---|---|
 | `server.js` | HTTP + WS + PTY host (single file) |
-| `public/` | Web UI — home, terminal tabs, file explorer |
+| `public/` | Web UI — home, terminal tabs, file explorer, remote screen |
+| `agent/screen-agent.ps1` | Windows screen capture + input agent (spawned on demand) |
 | `state.json` | Persisted workspaces + session records (auto-created) |
 | `data/scrollback/` | Per-session scrollback buffers (auto-created) |
 

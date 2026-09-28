@@ -104,6 +104,7 @@ function connect() {
           const pick = vis[0] || sessInView()[0];
           if (pick) select(pick.id); else { activeId = null; updateEmpty(); renderTabs(); }
         }
+        if (scrOpen) scrSend({ op: "sub", w: scrReqW() }); // re-subscribe after reconnect
         break;
       case "out": {
         const p = panes.get(m.id);
@@ -137,6 +138,7 @@ function connect() {
       case "pong":
         for (const el of [$("#latency"), $("#latency2")]) if (el) el.textContent = `${Date.now() - m.t}ms`;
         break;
+      case "screen": onScreenMsg(m); break;
     }
   };
 }
@@ -1538,6 +1540,84 @@ $("#new-ok").onclick = () => {
   setInterval(() => { if (view === "work") renderSessions(); }, 30000); // keep sess-time fresh
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
   new ResizeObserver(() => fitVisible()).observe(termsEl);
+  // ---------- remote screen ----------
+  const scrModal = $("#screen-modal"), scrImg = $("#scr-img"), scrStat = $("#scr-stat");
+  let scrOpen = false, scrPoll = null, scrArmR = false, scrPt = null, scrT2 = null;
+  const scrSend = (o) => send({ type: "screen", ...o });
+  const scrReqW = () => {
+    const st = $("#scr-stage");
+    return Math.max(480, Math.min(1600, Math.round((st ? st.clientWidth : innerWidth) * devicePixelRatio)));
+  };
+  const scrFrac = (cx, cy) => {
+    const r = scrImg.getBoundingClientRect();
+    return { x: Math.min(1, Math.max(0, (cx - r.left) / r.width)), y: Math.min(1, Math.max(0, (cy - r.top) / r.height)) };
+  };
+  const scrAsk = (delay) => {
+    clearTimeout(scrPoll);
+    if (scrOpen) scrPoll = setTimeout(() => scrSend({ op: "shot", w: scrReqW(), q: 55 }), delay);
+  };
+  function onScreenMsg(m) {
+    if (m.op === "frame") { scrImg.src = "data:image/jpeg;base64," + m.b64; scrStat.textContent = m.w + "x" + m.h; scrAsk(120); }
+    else if (m.op === "err") { scrStat.textContent = m.msg || "error"; scrAsk(1000); }
+  }
+  $("#screen-btn").onclick = () => {
+    scrModal.classList.remove("hidden"); scrOpen = true;
+    scrImg.removeAttribute("src"); scrStat.textContent = "connecting…";
+    scrSend({ op: "sub", w: scrReqW() });
+  };
+  $("#scr-close").onclick = () => {
+    scrOpen = false; clearTimeout(scrPoll);
+    scrModal.classList.add("hidden"); scrSend({ op: "unsub" });
+  };
+  $("#scr-rmb").onclick = (e) => { scrArmR = !scrArmR; e.target.classList.toggle("on", scrArmR); };
+  $("#scr-kb").onclick = () => $("#scr-keys").classList.toggle("hidden");
+  $("#scr-send").onclick = () => {
+    const t = $("#scr-type").value;
+    if (t) scrSend({ op: "type", text: t });
+    scrSend({ op: "key", k: "{ENTER}" });
+    $("#scr-type").value = "";
+  };
+  $("#scr-type").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#scr-send").click(); });
+  for (const b of document.querySelectorAll(".scr-k"))
+    b.onclick = () => scrSend({ op: "key", k: b.dataset.k });
+  // pointer: tap = click, press-and-drag = drag, long-press or armed = right click
+  scrImg.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    if (scrPt) { scrPt = null; return; }          // second finger cancels
+    scrImg.setPointerCapture(e.pointerId);
+    scrPt = { x: e.clientX, y: e.clientY, t: Date.now(), drag: false, pid: e.pointerId };
+  });
+  scrImg.addEventListener("pointermove", (e) => {
+    if (!scrPt || e.pointerId !== scrPt.pid) return;
+    if (!scrPt.drag && Math.hypot(e.clientX - scrPt.x, e.clientY - scrPt.y) > 8) {
+      scrPt.drag = true;
+      scrSend({ op: "down", btn: "l", ...scrFrac(scrPt.x, scrPt.y) });
+    }
+    if (scrPt.drag) scrSend({ op: "move", ...scrFrac(e.clientX, e.clientY) });
+  });
+  const scrUp = (e) => {
+    if (!scrPt || e.pointerId !== scrPt.pid) return;
+    if (scrPt.drag) scrSend({ op: "up", btn: "l", ...scrFrac(e.clientX, e.clientY) });
+    else {
+      const right = scrArmR || Date.now() - scrPt.t > 550;
+      scrSend({ op: "click", btn: right ? "r" : "l", ...scrFrac(e.clientX, e.clientY) });
+    }
+    scrArmR = false; $("#scr-rmb").classList.remove("on"); scrPt = null;
+  };
+  scrImg.addEventListener("pointerup", scrUp);
+  scrImg.addEventListener("pointercancel", () => { scrPt = null; });
+  scrImg.addEventListener("dblclick", (e) => scrSend({ op: "click", dbl: true, ...scrFrac(e.clientX, e.clientY) }));
+  scrImg.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    scrSend({ op: "scroll", d: Math.sign(e.deltaY) * 360, ...scrFrac(e.clientX, e.clientY) });
+  }, { passive: false });
+  scrImg.addEventListener("touchmove", (e) => {           // two-finger scroll
+    if (e.touches.length !== 2) { scrT2 = null; return; }
+    const y = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+    if (scrT2 != null && Math.abs(y - scrT2) > 6) { scrSend({ op: "scroll", x: 0.5, y: 0.5, d: (y - scrT2) * 2 }); scrT2 = y; }
+    else scrT2 = y;
+  }, { passive: true });
+
   // soft keyboard: slide the whole frame up instead of refitting terminals
   // (no repaint). Sources, whichever reports more: virtualKeyboard API
   // (Chromium 94+) and visualViewport (Safari/Firefox/older). In the APK the
