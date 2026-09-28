@@ -532,6 +532,15 @@ const server = http.createServer((req, res) => {
       return stream.pipe(res);
     } catch (e) { return jsonErr(res, 403, e.code || "unreadable"); }
   }
+  if (url.pathname === "/api/dbg" && req.method === "GET") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify({
+      wsClients: wss ? wss.clients.size : 0,
+      screenSubs: scrSubs().length,
+      screenAgent: !!scrAgent, shotBusy: scrShotBusy,
+      hostSock: !!hostSock, sessions: sessions.size,
+    }));
+  }
   if (url.pathname === "/api/peers" && req.method === "GET") return apiPeers(res);
   if (url.pathname === "/api/devports" && req.method === "GET") return apiDevports(res);
   if (url.pathname === "/api/git" && req.method === "GET") {
