@@ -8,23 +8,28 @@ Web UI (xterm.js) + PTY sessions that persist across restarts.
 - **Node.js 18+**
 - **Tailscale** installed and logged into your tailnet
 
-## Install on another machine
+## Install / update (Windows)
 
-**Windows (packaged release):**
+One command in PowerShell — installs or updates in place, keeping
+`state.json` and `data/`:
 
-1. Download `S-remote-v1.0.0-win-x64.7z` from
-   [GitHub Releases](https://github.com/thsangyk-oss/sremote/releases) and
-   extract it — `node_modules` is included and `node-pty` ships prebuilt
-   binaries for Windows/macOS/Linux (x64 + arm64), so no build step is needed.
-2. Either:
-   - `install.bat` — register auto-start at logon (Task Scheduler), add an
-     inbound firewall rule for TCP 2209 when run elevated, and start now; or
-   - `start.bat` — manual one-off start (equivalent to `node server.js`).
-3. Open from any device in the tailnet:
+```powershell
+irm https://raw.githubusercontent.com/thsangyk-oss/sremote/main/install.ps1 | iex
+```
 
-   ```
-   http://<machine-tailscale-ip>:2209
-   ```
+The script auto-detects an existing install (running server, scheduled
+task, well-known dirs), downloads `sremote-server.zip` from the latest
+[release](https://github.com/thsangyk-oss/sremote/releases), installs
+Node.js portable if missing, runs `npm install --omit=dev`, registers a
+`S-remote` scheduled task for autostart, and starts the server.
+Install dir defaults to `%LOCALAPPDATA%\S-remote` — override with
+`$env:SREMOTE_DIR`, skip the overwrite prompt with `$env:SREMOTE_YES=1`.
+
+Then open from any device in the tailnet:
+
+```
+http://<machine-tailscale-ip>:2209
+```
 
 **From source (any OS):** clone/copy this folder and run `node server.js`
 (`npm install` first if `node_modules` is absent — `node-pty` needs a
@@ -46,8 +51,8 @@ New-NetFirewallRule -DisplayName "S-remote" -Direction Inbound `
 
 ## Autostart
 
-**Windows:** `install.bat` sets up Task Scheduler at logon (see above).
-Equivalent manual command:
+**Windows:** the `irm` installer registers the `S-remote` task
+automatically. Equivalent manual command:
 
 ```powershell
 schtasks /create /tn "S-remote" /tr "node C:\path\to\S-remote\server.js" `
