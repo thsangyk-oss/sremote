@@ -711,7 +711,10 @@ const scrProSubs = () => [...(wss ? wss.clients : [])].filter((c) => c._screenPr
 function scrProStopSoon() {
   clearTimeout(scrProKillT);
   scrProKillT = setTimeout(() => {
-    if (!scrProSubs().length && scrProAgent) { try { scrProAgent.kill(); } catch {} }
+    if (!scrProSubs().length && scrProAgent) {
+      try { scrProAgent.stdin.write(JSON.stringify({ op: "block", on: false }) + "\n" + JSON.stringify({ op: "quit" }) + "\n"); } catch {}
+      setTimeout(() => { try { scrProAgent && scrProAgent.kill(); } catch {} }, 800);
+    }
   }, 30000);
 }
 function scrProEnsure() {

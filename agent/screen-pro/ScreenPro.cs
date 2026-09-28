@@ -48,7 +48,6 @@ class Dxgi : IDisposable {
 
   IntPtr dev, ctx, dup, staging;
   public int W, H, Fmt;
-  public int BlackStreak;
 
   public Dxgi() {
     IntPtr d, c; int lvl;
@@ -106,15 +105,16 @@ class Dxgi : IDisposable {
         int rb = W * 4;
         for (int y = 0; y < H; y++) {
           Buffer.MemoryCopy(s + (long)y * map.RowPitch, d2 + (long)y * bd.Stride, rb, rb);
-          if (!anyNz && BlackStreak <= 3)
+          if (!anyNz)
             for (int x = 0; x < rb; x += 4004)                       // 4-aligned: BGR bytes only, skip A
               if (s[y * map.RowPitch + x] != 0 || s[y * map.RowPitch + x + 1] != 0 || s[y * map.RowPitch + x + 2] != 0) { anyNz = true; break; }
         }
       }
       dst.UnlockBits(bd);
       M<UnmapD>(ctx, 15)(ctx, staging, 0);                               // Unmap
-      BlackStreak = anyNz ? 0 : BlackStreak + 1;
-      if (BlackStreak > 3) throw new Exception("dxgi frames all-black (driver?)");
+      // a fully-zero desktop frame means the driver gave us nothing usable —
+      // fall back to GDI immediately (still correct for genuinely dark screens)
+      if (!anyNz) throw new Exception("dxgi frames all-black (driver?)");
     } finally { M<SimpleD>(dup, 14)(dup); Rel(res); }                    // ReleaseFrame + release res
     return true;
   }
@@ -128,8 +128,16 @@ class ScreenPro {
   [DllImport("user32.dll")] static extern bool GetCursorInfo(ref CURSORINFO pci);
   [DllImport("user32.dll")] static extern bool DrawIconEx(IntPtr hdc, int x, int y, IntPtr hcur, int w, int h, int step, IntPtr brush, uint flags);
   [DllImport("user32.dll")] static extern bool GetIconInfo(IntPtr hIcon, ref ICONINFO ii);
+  [DllImport("user32.dll")] static extern uint SendInput(uint n, INPUT[] p, int cb);
+  [DllImport("user32.dll")] static extern bool BlockInput(bool f);
+  [DllImport("user32.dll")] static extern uint GetClipboardSequenceNumber();
   struct CURSORINFO { public int cbSize; public int flags; public IntPtr hCursor; public POINT2 ptScreenPos; }
   struct ICONINFO { public bool fIcon; public int xHotspot; public int yHotspot; public IntPtr hbmMask; public IntPtr hbmColor; }
+  // SendInput structs — union layout works on x86+x64 (FieldOffset(0) handles pad)
+  [StructLayout(LayoutKind.Sequential)] struct KEYBDINPUT { public ushort wVk, wScan; public uint dwFlags, time; public IntPtr ex; }
+  [StructLayout(LayoutKind.Sequential)] struct MOUSEINPUT { public int dx, dy; public uint data, dwFlags, time; public IntPtr ex; }
+  [StructLayout(LayoutKind.Explicit)] struct INPUT_U { [FieldOffset(0)] public KEYBDINPUT ki; [FieldOffset(0)] public MOUSEINPUT mi; }
+  [StructLayout(LayoutKind.Sequential)] struct INPUT { public uint type; public INPUT_U u; }
 
   static readonly JavaScriptSerializer JS = new JavaScriptSerializer();
   static Stream stdout;
@@ -151,21 +159,88 @@ class ScreenPro {
   }
   static void ClickAt(double x, double y, string btn, bool dbl, string only) {
     int sx, sy; ToScreen(x, y, out sx, out sy); SetCursorPos(sx, sy);
-    uint dn, up;
-    if (btn == "r") { dn = 0x08; up = 0x10; } else if (btn == "m") { dn = 0x20; up = 0x40; } else { dn = 0x02; up = 0x04; }
-    if (only == "down") { mouse_event(dn, 0, 0, 0, IntPtr.Zero); return; }
-    if (only == "up") { mouse_event(up, 0, 0, 0, IntPtr.Zero); return; }
+    uint dn, up, data = 0;
+    if (btn == "r") { dn = 0x08; up = 0x10; }
+    else if (btn == "m") { dn = 0x20; up = 0x40; }
+    else if (btn == "x1") { dn = 0x80; up = 0x100; data = 1; }
+    else if (btn == "x2") { dn = 0x80; up = 0x100; data = 2; }
+    else { dn = 0x02; up = 0x04; }
+    if (only == "down") { mouse_event(dn, 0, 0, data, IntPtr.Zero); return; }
+    if (only == "up") { mouse_event(up, 0, 0, data, IntPtr.Zero); return; }
     int n = dbl ? 2 : 1;
-    for (int i = 0; i < n; i++) { mouse_event(dn, 0, 0, 0, IntPtr.Zero); mouse_event(up, 0, 0, 0, IntPtr.Zero); }
+    for (int i = 0; i < n; i++) { mouse_event(dn, 0, 0, data, IntPtr.Zero); mouse_event(up, 0, 0, data, IntPtr.Zero); }
+  }
+  // ---------- SendInput keyboard ----------
+  static bool IsExt(int vk) {
+    switch (vk) {
+      case 33: case 34: case 35: case 36: case 37: case 38: case 39: case 40:   // pgup/dn end home arrows
+      case 45: case 46:                                                        // ins del
+      case 91: case 92: case 93:                                               // win menu
+      case 111:                                                                // numpad /
+      case 163: case 165:                                                      // rctrl ralt
+        return true;
+    }
+    return false;
+  }
+  static readonly HashSet<int> heldVk = new HashSet<int>();
+  static void KeyVk(int vk, bool up) {
+    var i = new INPUT(); i.type = 1;
+    i.u.ki.wVk = (ushort)vk;
+    i.u.ki.dwFlags = (up ? 0x02u : 0) | (IsExt(vk) ? 0x01u : 0);               // KEYUP | EXTENDEDKEY
+    SendInput(1, new[] { i }, Marshal.SizeOf(typeof(INPUT)));
+    if (up) heldVk.Remove(vk); else heldVk.Add(vk);
+  }
+  static void ReleaseAllKeys() {
+    foreach (int vk in heldVk) try { KeyVk(vk, true); } catch { }
+    heldVk.Clear();
+  }
+  static void Combo(int[] mods, int vk) {
+    foreach (int m2 in mods) KeyVk(m2, false);
+    KeyVk(vk, false); KeyVk(vk, true);
+    for (int i = mods.Length - 1; i >= 0; i--) KeyVk(mods[i], true);
   }
   static void SendText(string t) {
-    var sb = new StringBuilder();
+    // SendInput UNICODE — handles Vietnamese/emoji unlike SendKeys
+    var list = new List<INPUT>();
     foreach (char c in t) {
-      if ("+^%~(){}[]".IndexOf(c) >= 0) { sb.Append('{'); sb.Append(c); sb.Append('}'); }
-      else if (c == '\r' || c == '\n') sb.Append("{ENTER}");
-      else sb.Append(c);
+      var dn = new INPUT(); dn.type = 1; dn.u.ki.wScan = (ushort)c; dn.u.ki.dwFlags = 0x04;
+      var up = new INPUT(); up.type = 1; up.u.ki.wScan = (ushort)c; up.u.ki.dwFlags = 0x04 | 0x02;
+      list.Add(dn); list.Add(up);
     }
-    SendKeys.SendWait(sb.ToString());
+    for (int o = 0; o < list.Count; o += 32) {
+      int n = Math.Min(32, list.Count - o);
+      SendInput((uint)n, list.GetRange(o, n).ToArray(), Marshal.SizeOf(typeof(INPUT)));
+      Thread.Sleep(1);
+    }
+  }
+  // ---------- clipboard sync (STA thread, like AnyDesk auto-sync) ----------
+  static readonly object clipLock = new object();
+  static string clipPending;                          // remote -> host set request
+  static void ClipThread() {
+    uint lastSeq = GetClipboardSequenceNumber();
+    string lastSent = null;
+    while (running) {
+      string set; lock (clipLock) { set = clipPending; clipPending = null; }
+      if (set != null) {
+        try { Clipboard.SetText(set); lastSent = set; lastSeq = GetClipboardSequenceNumber(); } catch { }
+      }
+      uint seq = GetClipboardSequenceNumber();
+      if (seq != lastSeq) {
+        lastSeq = seq;
+        try {
+          if (Clipboard.ContainsText()) {
+            string t = Clipboard.GetText();
+            if (t != null && t != lastSent && t.Length <= 262144)
+              J(new Dictionary<string, object> { { "op", "clip" }, { "text", t } });
+          }
+        } catch { }
+      }
+      Thread.Sleep(400);
+    }
+  }
+  static bool blocked;
+  static void SetBlock(bool on) {
+    try { BlockInput(on); blocked = on; } catch { }
   }
   static double Num(IDictionary<string, object> m, string k, double d) { return m.ContainsKey(k) && m[k] != null ? Convert.ToDouble(m[k]) : d; }
   static string Str(IDictionary<string, object> m, string k, string d) { return m.ContainsKey(k) && m[k] != null ? Convert.ToString(m[k]) : d; }
@@ -189,7 +264,20 @@ class ScreenPro {
           case "move": { int sx, sy; ToScreen(Num(m, "x", 0), Num(m, "y", 0), out sx, out sy); SetCursorPos(sx, sy); break; }
           case "scroll": { int sx, sy; ToScreen(Num(m, "x", 0), Num(m, "y", 0), out sx, out sy); SetCursorPos(sx, sy); mouse_event(0x0800, 0, 0, (uint)(int)Num(m, "d", 0), IntPtr.Zero); break; }
           case "type": SendText(Str(m, "text", "")); break;
-          case "key": SendKeys.SendWait(Str(m, "k", "")); break;
+          case "key":
+            if (m.ContainsKey("vk")) { int vk = (int)Num(m, "vk", 0); if (vk > 0) { KeyVk(vk, false); KeyVk(vk, true); } }
+            else SendKeys.SendWait(Str(m, "k", ""));
+            break;
+          case "kd": { int vk = (int)Num(m, "vk", 0); if (vk > 0) KeyVk(vk, false); break; }
+          case "ku": { int vk = (int)Num(m, "vk", 0); if (vk > 0) KeyVk(vk, true); break; }
+          case "combo": {
+            var mods = new List<int>();
+            if (m.ContainsKey("mods") && m["mods"] is System.Collections.IEnumerable)
+              foreach (object o in (System.Collections.IEnumerable)m["mods"]) mods.Add(Convert.ToInt32(o));
+            Combo(mods.ToArray(), (int)Num(m, "vk", 0)); break;
+          }
+          case "clip": lock (clipLock) clipPending = Str(m, "text", ""); break;
+          case "block": SetBlock(Bool(m, "on")); break;
           case "ping": J(new Dictionary<string, object> { { "op", "pong" } }); break;
           case "quit": running = false; return;
         }
@@ -324,10 +412,15 @@ class ScreenPro {
 
   static int Main() {
     stdout = Console.OpenStandardOutput();
+    AppDomain.CurrentDomain.ProcessExit += (s, e) => { ReleaseAllKeys(); try { if (blocked) BlockInput(false); } catch { } };
     J(new Dictionary<string, object> { { "op", "ready" } });
+    var clip = new Thread(ClipThread); clip.IsBackground = true;
+    clip.SetApartmentState(ApartmentState.STA); clip.Start();           // Clipboard needs STA
     var cap = new Thread(CaptureLoop); cap.IsBackground = true; cap.Start();
     Reader();
     running = false;
+    ReleaseAllKeys();
+    if (blocked) { try { BlockInput(false); } catch { } }
     cap.Join(1500);
     return 0;
   }

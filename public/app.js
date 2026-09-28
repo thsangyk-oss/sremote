@@ -1585,6 +1585,13 @@ $("#new-ok").onclick = () => {
   screenResub = () => { if (scrOpen) scrSub(); };
   onScreenMsg = (m) => {
     if (m.pro) {
+      if (m.op === "clip") {                                       // host clipboard -> local
+        if (navigator.clipboard && m.text != null)
+          navigator.clipboard.writeText(m.text)
+            .then(() => { scrStat.textContent = "⧉ host clipboard synced"; })
+            .catch(() => {});
+        return;
+      }
       if (m.op === "pro-needed") scrStat.textContent = "pro: extension not installed — tap PRO again to install";
       else if (m.op === "err") scrStat.textContent = m.msg || "pro error";
       else if (m.op === "info" && !scrGot) scrStat.textContent = `pro ${m.w}x${m.h} [${m.src || "?"}], waiting frames…`;
@@ -1650,7 +1657,10 @@ $("#new-ok").onclick = () => {
   $("#scr-close").onclick = () => {
     scrOpen = false; clearTimeout(scrPoll); clearInterval(scrWatch);
     scrModal.classList.add("hidden");
+    if (held.size) { releaseAll(); }                                // don't leave keys stuck on host
+    if ($("#scr-block").classList.contains("on")) { scrSend({ op: "block", on: false }, true); $("#scr-block").classList.remove("on"); }
     scrSend({ op: "unsub" }, false); scrSend({ op: "unsub" }, true);
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
   };
   $("#scr-rmb").onclick = (e) => { scrArmR = !scrArmR; e.target.classList.toggle("on", scrArmR); };
   $("#scr-kb").onclick = () => $("#scr-keys").classList.toggle("hidden");
@@ -1663,9 +1673,78 @@ $("#new-ok").onclick = () => {
   $("#scr-type").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#scr-send").click(); });
   for (const b of document.querySelectorAll(".scr-k"))
     b.onclick = () => scrSend({ op: "key", k: b.dataset.k });
+  // ---------- pro control: real keyboard + clipboard + shortcuts ----------
+  const VK = { Backspace: 8, Tab: 9, Enter: 13, ShiftLeft: 160, ShiftRight: 161, ControlLeft: 162, ControlRight: 163,
+    AltLeft: 164, AltRight: 165, Pause: 19, CapsLock: 20, Escape: 27, Space: 32, PageUp: 33, PageDown: 34, End: 35,
+    Home: 36, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, PrintScreen: 44, Insert: 45, Delete: 46,
+    MetaLeft: 91, MetaRight: 92, ContextMenu: 93, NumLock: 144, ScrollLock: 145,
+    Semicolon: 186, Equal: 187, Comma: 188, Minus: 189, Period: 190, Slash: 191, Backquote: 192,
+    BracketLeft: 219, Backslash: 220, BracketRight: 221, Quote: 222,
+    NumpadMultiply: 106, NumpadAdd: 107, NumpadSubtract: 109, NumpadDecimal: 110, NumpadDivide: 111 };
+  for (let i = 0; i < 10; i++) { VK["Digit" + i] = 48 + i; VK["Numpad" + i] = 96 + i; }
+  for (let i = 0; i < 26; i++) VK["Key" + String.fromCharCode(65 + i)] = 65 + i;
+  for (let i = 1; i <= 12; i++) VK["F" + i] = 111 + i;
+  const held = new Set();
+  const releaseAll = () => { for (const vk of held) scrSend({ op: "ku", vk }); held.clear(); };
+  const COMBOS = { "alt-tab": [[164], 9], "alt-f4": [[164], 115], taskmgr: [[162, 160], 27], win: [[], 91],
+    "win-d": [[91], 68], "win-e": [[91], 69], "win-r": [[91], 82], prtsc: [[], 44] };
+  scrCanvas.tabIndex = 0;
+  scrCanvas.addEventListener("keydown", (e) => {
+    if (!scrPro) return;
+    e.preventDefault(); e.stopPropagation();
+    const vk = VK[e.code];
+    if (e.ctrlKey && e.code === "KeyV") {                          // ordered: clip first, then host paste
+      held.delete(86);
+      if (navigator.clipboard)
+        navigator.clipboard.readText()
+          .then((t) => { if (t) scrSend({ op: "clip", text: t }); setTimeout(() => scrSend({ op: "combo", mods: [162], vk: 86 }), 120); })
+          .catch(() => scrSend({ op: "combo", mods: [162], vk: 86 }));
+      else scrSend({ op: "combo", mods: [162], vk: 86 });
+      return;
+    }
+    if (!vk || held.has(vk)) return;
+    held.add(vk); scrSend({ op: "kd", vk });
+  });
+  scrCanvas.addEventListener("keyup", (e) => {
+    if (!scrPro) return;
+    e.preventDefault();
+    const vk = VK[e.code];
+    if (vk && held.delete(vk)) scrSend({ op: "ku", vk });
+  });
+  scrCanvas.addEventListener("blur", releaseAll);
+  scrCanvas.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    if (scrOpen) scrSend({ op: "click", btn: "r", ...scrFrac(e.clientX, e.clientY) });
+  });
+  scrCanvas.addEventListener("auxclick", (e) => {
+    e.preventDefault();
+    if (!scrOpen) return;
+    const btn = e.button === 1 ? "m" : e.button === 3 ? "x1" : e.button === 4 ? "x2" : null;
+    if (btn) scrSend({ op: "click", btn, ...scrFrac(e.clientX, e.clientY) });
+  });
+  $("#scr-paste").onclick = () => {                                // mobile paste: clip -> ctrl+v
+    if (!navigator.clipboard) return;
+    navigator.clipboard.readText()
+      .then((t) => { if (t) { scrSend({ op: "clip", text: t }); setTimeout(() => scrSend({ op: "combo", mods: [162], vk: 86 }), 150); } })
+      .catch(() => { scrStat.textContent = "clipboard blocked — long-press and use browser paste"; });
+  };
+  for (const b of document.querySelectorAll(".scr-c"))
+    b.onclick = () => { const c = COMBOS[b.dataset.c]; if (c) scrSend({ op: "combo", mods: c[0], vk: c[1] }); };
+  $("#scr-fs").onclick = () => {
+    const card = document.querySelector(".screen-card");
+    if (document.fullscreenElement) document.exitFullscreen();
+    else if (card.requestFullscreen) card.requestFullscreen().catch(() => {});
+  };
+  $("#scr-block").onclick = (e) => {
+    const on = !e.target.classList.contains("on");
+    e.target.classList.toggle("on", on);
+    scrSend({ op: "block", on });
+    scrStat.textContent = on ? "host input BLOCKED" : "";
+  };
   // pointer: tap = click, press-and-drag = drag, long-press or armed = right click
   scrStage.addEventListener("pointerdown", (e) => {
     e.preventDefault();
+    if (scrPro) scrCanvas.focus({ preventScroll: true });           // keyboard capture for pro
     if (scrPt) { scrPt = null; return; }          // second finger cancels
     scrStage.setPointerCapture(e.pointerId);
     scrPt = { x: e.clientX, y: e.clientY, t: Date.now(), drag: false, pid: e.pointerId };

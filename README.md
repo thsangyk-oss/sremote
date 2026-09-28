@@ -133,6 +133,31 @@ install the extension: the host compiles the C# source locally with the
 - `GET /api/screen-pro` → install status, `POST /api/screen-pro` →
   compile `ScreenPro.cs` → `ScreenPro.exe`. The exe is gitignored;
   reinstall is a one-click action per host.
+- If DXGI returns all-black frames (driver quirk), the agent detects it
+  and falls back to GDI capture automatically — the full virtual screen
+  is then streamed via the same tile pipeline.
+
+**Pro control (AnyDesk/RustDesk-style):**
+
+- **Real keyboard**: the canvas captures `keydown`/`keyup` → `SendInput`
+  with true key down/up — holding keys, modifier combos, F-keys, Win key
+  all work. Focus the canvas (tap/click it) to capture keys; clicking
+  outside releases them.
+- **Unicode typing**: `type` op uses `KEYEVENTF_UNICODE` — Vietnamese
+  and non-Latin input work, unlike SendKeys.
+- **Clipboard sync**: host clipboard changes are pushed to the client
+  automatically; `Ctrl+V` on the canvas (or the ⧉Paste button) sets the
+  host clipboard first, then pastes — ordered over the same channel.
+- **Mouse**: left/middle/right/X1/X2 buttons — right-click and the
+  context menu work directly on the canvas, aux buttons via `auxclick`.
+- **Shortcut buttons** in the ⌨ panel: Alt+Tab, Alt+F4, Task Manager,
+  Win, Win+D, Win+E, PrtSc. `Ctrl+Alt+Del` is not possible — the secure
+  attention sequence requires a Windows service (same limit RustDesk has
+  without its service).
+- **⛔ button**: `BlockInput` on the host — freezes ALL input (local and
+  injected); remote becomes view-only until toggled off. Auto-releases
+  when the session/agent stops.
+- **⛶ fullscreen** toggle.
 
 ## HTTP API
 

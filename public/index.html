@@ -259,14 +259,23 @@
       <button id="scr-pro" class="mini-btn" title="Pro mode — DXGI push streaming (native extension)">PRO</button>
       <button id="scr-rmb" class="mini-btn" title="Arm right-click for next tap">R-clk</button>
       <button id="scr-kb" class="mini-btn" title="Keyboard input">⌨</button>
+      <button id="scr-fs" class="mini-btn" title="Fullscreen">⛶</button>
+      <button id="scr-block" class="mini-btn" title="Block input on host (AnyDesk-style)">⛔</button>
       <button id="scr-close" class="mini-btn" title="Close">×</button>
     </div>
-    <div id="scr-stage"><img id="scr-img" draggable="false" alt=""><canvas id="scr-canvas" class="hidden"></canvas></div>
+    <div id="scr-stage"><img id="scr-img" draggable="false" alt=""><canvas id="scr-canvas" class="hidden" tabindex="0"></canvas></div>
     <div id="scr-keys" class="hidden">
       <input id="scr-type" placeholder="Type text — Enter sends" autocomplete="off" autocapitalize="none" spellcheck="false">
       <button class="mini-btn scr-k" data-k="{ESC}">Esc</button>
       <button class="mini-btn scr-k" data-k="{TAB}">Tab</button>
-      <button class="mini-btn scr-k" data-k="^{ESC}" title="Start menu">Win</button>
+      <button class="mini-btn scr-c" data-c="alt-tab" title="Alt+Tab">A-Tab</button>
+      <button class="mini-btn scr-c" data-c="alt-f4" title="Alt+F4">A-F4</button>
+      <button class="mini-btn scr-c" data-c="taskmgr" title="Ctrl+Shift+Esc — Task Manager">TMgr</button>
+      <button class="mini-btn scr-c" data-c="win" title="Windows key">Win</button>
+      <button class="mini-btn scr-c" data-c="win-d" title="Win+D — show desktop">W-D</button>
+      <button class="mini-btn scr-c" data-c="win-e" title="Win+E — Explorer">W-E</button>
+      <button class="mini-btn scr-c" data-c="prtsc" title="Print Screen">PrtSc</button>
+      <button id="scr-paste" class="mini-btn" title="Paste local clipboard on host (pro)">⧉Paste</button>
       <button id="scr-send" class="btn">Send+⏎</button>
     </div>
   </div>
@@ -278,6 +287,6 @@
 <script src="/vendor/addon-search.js"></script>
 <script src="/vendor/addon-web-links.js"></script>
 <script src="/vendor/addon-unicode11.js"></script>
-<script src="/app.js?v=22"></script>
+<script src="/app.js?v=23"></script>
 </body>
 </html>
