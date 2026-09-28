@@ -1571,6 +1571,7 @@ $("#new-ok").onclick = () => {
       if (!scrGot) { scrGot = true; clearInterval(scrWatch); }
       scrImg.src = "data:image/jpeg;base64," + m.b64; scrStat.textContent = m.w + "x" + m.h; scrAsk(120);
     } else if (m.op === "err") { scrStat.textContent = m.msg || "error"; scrAsk(1000); }
+    else if (!scrGot) scrStat.textContent = (m.op === "info" ? `host ${m.w}x${m.h}, waiting frames…` : "host: " + m.op);
   }
   $("#screen-btn").onclick = () => {
     scrModal.classList.remove("hidden"); scrOpen = true;
