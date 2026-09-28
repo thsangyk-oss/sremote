@@ -86,6 +86,17 @@ with a `KeepAlive` ProgramArguments entry pointing at `server.js`.
   `/usr/bin/zsh`, `/bin/zsh`, `/bin/sh` (and `pwsh` if on PATH); the folder
   picker lists `/` and `~` instead of drives.
 
+## Sessions survive server restarts
+
+PTYs are owned by `agent/session-host.js` — a detached broker daemon the
+server spawns on demand and talks to over a per-install named pipe
+(`\\.\pipe\sremote-sessions-*`) / unix socket (`data/host.sock`).
+Restarting or updating `server.js` only drops the WebSocket layer; shells
+and everything running inside them (dev servers, agents, builds) keep
+running, and scrollback buffers stay resident. Broker crash → server
+respawns it; sessions restore from `data/sessions.json` +
+`data/scrollback/` (respawned shells — same as the old restart path).
+
 ## Remote screen (Windows)
 
 The 🖥 button opens a live view of the host desktop. Tap = left click,
@@ -135,13 +146,15 @@ when the base is a git repo, and files there are swept after 7 days.
 | `server.js` | HTTP + WS + PTY host (single file) |
 | `public/` | Web UI — home, terminal tabs, file explorer, remote screen |
 | `agent/screen-agent.ps1` | Windows screen capture + input agent (spawned on demand) |
+| `agent/session-host.js` | Session broker daemon — owns PTYs + scrollback across server restarts |
 | `state.json` | Persisted workspaces + session records (auto-created) |
 | `data/scrollback/` | Per-session scrollback buffers (auto-created) |
 
 ## Architecture
 
 ```
-client browser ──Tailscale WireGuard──> server.js :2209 ──ConPTY──> shell
+client browser ──Tailscale WireGuard──> server.js :2209 ──pipe──> session-host ──ConPTY──> shell
+                                        (frontend; restartable)      (broker; outlives server)
 ```
 
 No signaling, no TURN, no tunnel. Pairing = being on the same tailnet.

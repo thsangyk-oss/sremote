@@ -4,17 +4,17 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const { WebSocketServer } = require("ws");
-const pty = require("node-pty");
 const { spawn, execFile } = require("child_process");
+const net = require("net");
+const crypto = require("crypto");
 
 const PORT = 2209;
 const IS_WIN = process.platform === "win32";
 const ROOT = __dirname;
 const PUBLIC = path.join(ROOT, "public");
 const STATE_FILE = path.join(ROOT, "state.json");
-const SB_DIR = path.join(ROOT, "data", "scrollback");
-const SCROLLBACK_MAX = 256 * 1024;
-fs.mkdirSync(SB_DIR, { recursive: true });
+const DATA_DIR = path.join(ROOT, "data");
+fs.mkdirSync(DATA_DIR, { recursive: true });
 
 // ---------- access control: tailnet + localhost only ----------
 function tailscaleIPv4() {
@@ -46,22 +46,7 @@ function saveState() {
 let wsSeq = 0;
 function workspaceById(id) { return state.workspaces.find((w) => w.id === id); }
 
-const sbFile = (id) => path.join(SB_DIR, `${id}.bin`);
-function loadScrollback(id) {
-  try { return fs.readFileSync(sbFile(id)); } catch { return Buffer.alloc(0); }
-}
-function flushScrollback(s) {
-  if (!s.sbDirty) return;
-  try { fs.writeFileSync(sbFile(s.id), s.scrollback); } catch {}
-  s.sbDirty = false;
-}
-function persistSessions() {
-  state.sessions = [...sessions.values()].map((s) => ({
-    id: s.id, name: s.name, shell: s.shell, cwd: s.cwd,
-    workspace: s.workspace, createdAt: s.createdAt, exited: s.exited,
-  }));
-  saveState();
-}
+
 
 // ---------- directory browse ----------
 function listDrives() {
@@ -127,48 +112,111 @@ const SHELLS = IS_WIN
       return sh;
     })();
 
-// ---------- PTY sessions (persisted & restorable) ----------
-const sessions = new Map(); // id -> {id,name,shell,cwd,workspace,proc,scrollback,createdAt,clients:Set,exited}
-let seq = 0;
-const RESTORE_MARK = "\r\n\x1b[90m── session restored ──\x1b[0m\r\n";
+// ---------- session broker ----------
+// PTYs live in agent/session-host.js — a detached daemon — so terminal
+// sessions (and whatever runs inside them) survive server.js restarts.
+// JSONL over a named pipe (win) / unix sock (other); pipe name is per-install.
+const HOST_JS = path.join(ROOT, "agent", "session-host.js");
+const HOST_ADDR = IS_WIN
+  ? "\\\\.\\pipe\\sremote-sessions-" +
+    crypto.createHash("sha1").update(ROOT.toLowerCase()).digest("hex").slice(0, 10)
+  : path.join(DATA_DIR, "host.sock");
+let hostSock = null, hostProc = null, hostConn = null, hostFresh = false;
+let attachTok = 0, seq = 0, lastSpawn = 0;
+const pendingAttach = new Map(); // tok -> ws
+const sessions = new Map();      // id -> {id,name,shell,cwd,workspace,createdAt,exited,clients:Set}
 
-// env vars injected by IDE/agent hosts — must not leak into spawned shells,
-// otherwise tools like `devin` think they run inside an ACP host
-const ENV_DENY = /^(ACP_|WINDSURF_|VSCODE_|TERM_PROGRAM|TERM_SESSION_ID|EXEPATH$|PLINK_PROTOCOL$)/i;
-function cleanEnv() {
-  const env = {};
-  for (const [k, v] of Object.entries(process.env)) if (!ENV_DENY.test(k)) env[k] = v;
-  env.TERM = "xterm-256color";
-  env.COLORTERM = "truecolor";
-  // our renderer is xterm.js — same engine as VS Code's terminal; claim it so
-  // TUIs don't fall back to "conhost" detection on Windows
-  env.TERM_PROGRAM = "vscode";
-  return env;
+function hostSend(o) {
+  if (hostSock && hostSock.writable) hostSock.write(JSON.stringify(o) + "\n");
 }
+function spawnHost() {
+  if (hostProc || Date.now() - lastSpawn < 3000) return;
+  lastSpawn = Date.now();
+  try {
+    const logFd = fs.openSync(path.join(DATA_DIR, "host.log"), "a");
+    hostProc = spawn(process.execPath, [HOST_JS],
+      { detached: true, stdio: ["ignore", "ignore", logFd], windowsHide: true, cwd: ROOT });
+    hostProc.on("exit", () => { hostProc = null; });
+    hostProc.unref();
+  } catch (e) { console.error("session host spawn failed:", e.message); }
+}
+function onHostMsg(m) {
+  switch (m.op) {
+    case "sessions":
+      applySessions(m.list);
+      broadcastSessions();
+      if (hostFresh) { hostFresh = false; reattachAll(); }
+      break;
+    case "out": {
+      const s = sessions.get(m.id); if (!s) break;
+      const out = JSON.stringify({ type: "out", id: m.id, data: m.data });
+      for (const ws of s.clients) if (ws.readyState === 1) ws.send(out);
+      break;
+    }
+    case "exit": {
+      const s = sessions.get(m.id); if (!s) break;
+      s.exited = true;
+      const out = JSON.stringify({ type: "exit", id: m.id, code: m.code });
+      for (const ws of s.clients) if (ws.readyState === 1) ws.send(out);
+      break;
+    }
+    case "attached": {
+      const ws = pendingAttach.get(m.tok);
+      pendingAttach.delete(m.tok);
+      if (!ws || ws.readyState !== 1) break;
+      const s = sessions.get(m.id);
+      if (s) s.exited = !!m.exited;
+      ws.send(JSON.stringify({ type: "attached", id: m.id, exited: m.gone ? true : m.exited }));
+      if (m.data) ws.send(JSON.stringify({ type: "out", id: m.id, data: m.data }));
+      break;
+    }
+  }
+}
+function hostConnect() {
+  if (hostSock || hostConn) return;
+  const c = net.connect(HOST_ADDR);
+  hostConn = c;
+  let buf = "";
+  c.on("data", (d) => {
+    buf += d;
+    let i;
+    while ((i = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, i); buf = buf.slice(i + 1);
+      if (!line.trim()) continue;
+      let m; try { m = JSON.parse(line); } catch { continue; }
+      onHostMsg(m);
+    }
+  });
+  c.on("connect", () => { hostSock = c; hostFresh = true; });
+  c.on("error", () => {});
+  c.on("close", () => {
+    hostConn = null;
+    if (hostSock === c) hostSock = null;
+    setTimeout(hostConnect, 400); // also (re)spawns broker if it's down
+    spawnHost();
+  });
+  // first connect attempt fails when broker isn't up yet — spawn then retry
+  c.once("error", () => { spawnHost(); setTimeout(hostConnect, 400); });
+}
+function ensureHost() { hostConnect(); }
 
-function spawnProc(sess) {
-  const s = SHELLS[sess.shell] || SHELLS.powershell || Object.values(SHELLS)[0];
-  const proc = pty.spawn(s.path, s.args, {
-    name: "xterm-256color", cols: sess.cols || 120, rows: sess.rows || 32, cwd: sess.cwd,
-    env: cleanEnv(),
-  });
-  sess.proc = proc;
-  sess.exited = false;
-  proc.onData((d) => {
-    const buf = Buffer.from(d, "utf8");
-    sess.scrollback = Buffer.concat([sess.scrollback, buf]).subarray(-SCROLLBACK_MAX);
-    sess.sbDirty = true;
-    const msg = JSON.stringify({ type: "out", id: sess.id, data: d });
-    for (const ws of sess.clients) if (ws.readyState === 1) ws.send(msg);
-  });
-  proc.onExit(({ exitCode }) => {
-    sess.exited = true;
-    flushScrollback(sess);
-    persistSessions();
-    const msg = JSON.stringify({ type: "exit", id: sess.id, code: exitCode });
-    for (const ws of sess.clients) if (ws.readyState === 1) ws.send(msg);
-    broadcastSessions();
-  });
+function applySessions(list) {
+  const seen = new Set();
+  for (const r of list) {
+    seen.add(r.id);
+    const s = sessions.get(r.id);
+    if (s) Object.assign(s, r);
+    else sessions.set(r.id, { ...r, clients: new Set() });
+  }
+  for (const id of [...sessions.keys()]) if (!seen.has(id)) sessions.delete(id);
+}
+function reattachAll() {
+  for (const ws of wss ? wss.clients : []) {
+    if (!ws._attached || ws.readyState !== 1) continue;
+    const tok = ++attachTok;
+    pendingAttach.set(tok, ws);
+    hostSend({ op: "attach", id: ws._attached, tok });
+  }
 }
 
 function createSession({ shell = "powershell", cwd, cols = 120, rows = 32, workspace, name }) {
@@ -177,40 +225,21 @@ function createSession({ shell = "powershell", cwd, cols = 120, rows = 32, works
   const dir = wsp ? wsp.path : cwd && fs.existsSync(cwd) ? cwd : os.homedir();
   if (wsp) { wsp.lastUsed = Date.now(); saveState(); }
   const sess = {
-    id, name: String(name || "").trim().slice(0, 60) || (wsp ? wsp.name : `${shell} ${seq}`), shell, cwd: dir,
-    workspace: wsp ? wsp.id : null, cols, rows,
-    proc: null, scrollback: Buffer.alloc(0), createdAt: Date.now(), clients: new Set(),
-    exited: false, sbDirty: false,
+    id, name: String(name || "").trim().slice(0, 60) || (wsp ? wsp.name : `${shell} ${seq}`),
+    shell, cwd: dir, workspace: wsp ? wsp.id : null,
+    createdAt: Date.now(), exited: false, clients: new Set(),
   };
   sessions.set(id, sess);
-  spawnProc(sess);
-  persistSessions();
+  hostSend({ op: "create", id, name: sess.name, shell, cwd: dir, workspace: sess.workspace, cols, rows });
   broadcastSessions();
   return sess;
-}
-
-function restoreSessions() {
-  for (const rec of state.sessions) {
-    if (sessions.has(rec.id)) continue;
-    const sess = {
-      ...rec, proc: null, scrollback: loadScrollback(rec.id),
-      clients: new Set(), sbDirty: false,
-    };
-    sessions.set(sess.id, sess);
-    if (!rec.exited && fs.existsSync(sess.cwd)) {
-      sess.scrollback = Buffer.concat([sess.scrollback, Buffer.from(RESTORE_MARK)]).subarray(-SCROLLBACK_MAX);
-      try { spawnProc(sess); } catch { sess.exited = true; }
-    }
-  }
 }
 
 function killSession(id) {
   const s = sessions.get(id);
   if (!s) return false;
-  try { s.proc && s.proc.kill(); } catch {}
+  hostSend({ op: "kill", id });
   sessions.delete(id);
-  try { fs.rmSync(sbFile(id), { force: true }); } catch {}
-  persistSessions();
   broadcastSessions();
   return true;
 }
@@ -218,8 +247,7 @@ function killSession(id) {
 function sessionList() {
   return [...sessions.values()].map((s) => ({
     id: s.id, name: s.name, shell: s.shell, cwd: s.cwd, workspace: s.workspace,
-    createdAt: s.createdAt, exited: s.exited,
-    clients: s.clients.size,
+    createdAt: s.createdAt, exited: s.exited, clients: s.clients.size,
   }));
 }
 function broadcastSessions() {
@@ -664,29 +692,22 @@ wss.on("connection", (ws, req) => {
     switch (msg.type) {
       case "attach": {
         if (!s) return;
-        // revive a dead/exited session: fresh shell at same cwd, scrollback kept
-        if (s.exited || !s.proc) {
-          if (!fs.existsSync(s.cwd)) break;
-          s.scrollback = Buffer.concat([s.scrollback, Buffer.from(RESTORE_MARK)]).subarray(-SCROLLBACK_MAX);
-          try { spawnProc(s); } catch { break; }
-          persistSessions();
-          broadcastSessions();
-        }
         s.clients.add(ws);
         ws._attached = msg.id;
-        ws.send(JSON.stringify({ type: "attached", id: s.id, exited: s.exited }));
-        if (s.scrollback.length) ws.send(JSON.stringify({ type: "out", id: s.id, data: s.scrollback.toString("utf8") }));
-        if (msg.cols && s.proc) { try { s.proc.resize(msg.cols, msg.rows); } catch {} }
+        const tok = ++attachTok;
+        pendingAttach.set(tok, ws);
+        // broker revives exited sessions and replies with scrollback
+        hostSend({ op: "attach", id: s.id, tok, cols: msg.cols, rows: msg.rows });
         break;
       }
       case "detach":
         if (s) { s.clients.delete(ws); ws._attached = null; }
         break;
       case "in":
-        if (s && !s.exited && s.proc) s.proc.write(msg.data);
+        if (s && !s.exited) hostSend({ op: "in", id: s.id, data: msg.data });
         break;
       case "resize":
-        if (s && !s.exited && s.proc) { try { s.proc.resize(msg.cols, msg.rows); } catch {} }
+        if (s && !s.exited) hostSend({ op: "resize", id: s.id, cols: msg.cols, rows: msg.rows });
         break;
       case "create": {
         const ns = createSession({ shell: msg.shell, cwd: msg.cwd, cols: msg.cols, rows: msg.rows, workspace: msg.workspace, name: msg.name });
@@ -696,7 +717,7 @@ wss.on("connection", (ws, req) => {
       case "rename":
         if (s) {
           const n = String(msg.name || "").trim().slice(0, 60);
-          if (n) { s.name = n; persistSessions(); broadcastSessions(); }
+          if (n) { s.name = n; hostSend({ op: "rename", id: s.id, name: n }); broadcastSessions(); }
         }
         break;
       case "kill":
@@ -727,20 +748,14 @@ wss.on("connection", (ws, req) => {
   });
   ws.on("close", () => {
     for (const s of sessions.values()) s.clients.delete(ws);
+    for (const [tok, w] of pendingAttach) if (w === ws) pendingAttach.delete(tok);
     if (ws._screen) { ws._screen = false; scrStopSoon(); }
   });
 });
 
 // ---------- boot ----------
-restoreSessions();
+ensureHost(); // connect to (or spawn) the session broker — PTYs live there
 for (const w of state.workspaces) sweepTmpUpload(path.join(w.path, "temp-upload"));
-setInterval(() => { for (const s of sessions.values()) flushScrollback(s); }, 3000);
-for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
-  process.on(sig, () => {
-    for (const s of sessions.values()) flushScrollback(s);
-    process.exit(0);
-  });
-}
 
 server.listen(PORT, "0.0.0.0", () => {
   const ip = tailscaleIPv4();
