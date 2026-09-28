@@ -12,7 +12,7 @@
 <meta name="theme-color" content="#0a0d12">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="stylesheet" href="/vendor/xterm.css">
-<link rel="stylesheet" href="/style.css?v=16">
+<link rel="stylesheet" href="/style.css?v=17">
 </head>
 <body>
 
@@ -256,11 +256,12 @@
       <span>Screen</span>
       <span id="scr-stat" class="scr-stat"></span>
       <span class="scr-spring"></span>
+      <button id="scr-pro" class="mini-btn" title="Pro mode — DXGI push streaming (native extension)">PRO</button>
       <button id="scr-rmb" class="mini-btn" title="Arm right-click for next tap">R-clk</button>
       <button id="scr-kb" class="mini-btn" title="Keyboard input">⌨</button>
       <button id="scr-close" class="mini-btn" title="Close">×</button>
     </div>
-    <div id="scr-stage"><img id="scr-img" draggable="false" alt=""></div>
+    <div id="scr-stage"><img id="scr-img" draggable="false" alt=""><canvas id="scr-canvas" class="hidden"></canvas></div>
     <div id="scr-keys" class="hidden">
       <input id="scr-type" placeholder="Type text — Enter sends" autocomplete="off" autocapitalize="none" spellcheck="false">
       <button class="mini-btn scr-k" data-k="{ESC}">Esc</button>
@@ -277,6 +278,6 @@
 <script src="/vendor/addon-search.js"></script>
 <script src="/vendor/addon-web-links.js"></script>
 <script src="/vendor/addon-unicode11.js"></script>
-<script src="/app.js?v=21"></script>
+<script src="/app.js?v=22"></script>
 </body>
 </html>

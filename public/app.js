@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 
 // ---------- state ----------
 let ws = null, wsAlive = false, reconnectTimer = null;
-let onScreenMsg = () => {}, screenResub = () => {}; // wired inside the init IIFE below
+let onScreenMsg = () => {}, onScreenBin = () => {}, screenResub = () => {}; // wired inside the init IIFE below
 let sessions = [];          // all server sessions
 let workspaces = [];        // persisted workspace folders
 let activeId = null;
@@ -78,6 +78,7 @@ const sessInView = () => sessions.filter((s) => (s.workspace || null) === (curre
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.binaryType = "arraybuffer";
   ws.onopen = () => {
     wsAlive = true;
     setConn(true);
@@ -94,6 +95,7 @@ function connect() {
   };
   ws.onerror = () => {};
   ws.onmessage = (ev) => {
+    if (typeof ev.data !== "string") { onScreenBin(ev.data); return; }
     let m; try { m = JSON.parse(ev.data); } catch { return; }
     switch (m.type) {
       case "sessions":
@@ -1543,19 +1545,26 @@ $("#new-ok").onclick = () => {
   new ResizeObserver(() => fitVisible()).observe(termsEl);
   // ---------- remote screen ----------
   const scrModal = $("#screen-modal"), scrImg = $("#scr-img"), scrStat = $("#scr-stat");
+  const scrStage = $("#scr-stage"), scrCanvas = $("#scr-canvas"), scrCtx = scrCanvas.getContext("2d");
   let scrOpen = false, scrPoll = null, scrArmR = false, scrPt = null, scrT2 = null;
-  const scrSend = (o) => send({ type: "screen", ...o });
+  let scrPro = false;                 // pro mode: native dxgi push agent
+  const scrSend = (o, pro) => send({ type: "screen", pro: pro === undefined ? scrPro : pro, ...o });
   const scrReqW = () => {
-    const st = $("#scr-stage");
-    return Math.max(480, Math.min(1600, Math.round((st ? st.clientWidth : innerWidth) * devicePixelRatio)));
+    return Math.max(480, Math.min(1920, Math.round((scrStage ? scrStage.clientWidth : innerWidth) * devicePixelRatio)));
   };
+  const scrView = () => (scrPro ? scrCanvas : scrImg);
   const scrFrac = (cx, cy) => {
-    const r = scrImg.getBoundingClientRect();
+    const r = scrView().getBoundingClientRect();
     return { x: Math.min(1, Math.max(0, (cx - r.left) / r.width)), y: Math.min(1, Math.max(0, (cy - r.top) / r.height)) };
   };
   const scrAsk = (delay) => {
     clearTimeout(scrPoll);
-    if (scrOpen) scrPoll = setTimeout(() => scrSend({ op: "shot", w: scrReqW(), q: 55 }), delay);
+    if (scrOpen && !scrPro) scrPoll = setTimeout(() => scrSend({ op: "shot", w: scrReqW(), q: 55 }), delay);
+  };
+  const scrSub = () => scrSend({ op: "sub", w: scrReqW(), fps: 15, q: 70 });
+  const scrShow = () => {
+    scrImg.classList.toggle("hidden", scrPro);
+    scrCanvas.classList.toggle("hidden", !scrPro);
   };
   let scrWatch = null, scrGot = false;
   const scrWatchdog = () => {
@@ -1570,26 +1579,78 @@ $("#new-ok").onclick = () => {
         return;
       }
       scrStat.textContent = "waiting for host… (old server? reload/upgrade)";
-      scrSend({ op: "sub", w: scrReqW() });
+      scrSub();
     }, 4000);
   };
-  screenResub = () => { if (scrOpen) scrSend({ op: "sub", w: scrReqW() }); };
+  screenResub = () => { if (scrOpen) scrSub(); };
   onScreenMsg = (m) => {
+    if (m.pro) {
+      if (m.op === "pro-needed") scrStat.textContent = "pro: extension not installed — tap PRO again to install";
+      else if (m.op === "err") scrStat.textContent = m.msg || "pro error";
+      else if (m.op === "info" && !scrGot) scrStat.textContent = `pro ${m.w}x${m.h} [${m.src || "?"}], waiting frames…`;
+      else if (!scrGot) scrStat.textContent = "pro: " + m.op;
+      return;
+    }
     if (m.op === "frame") {
       if (!scrGot) { scrGot = true; clearInterval(scrWatch); }
       scrImg.src = "data:image/jpeg;base64," + m.b64; scrStat.textContent = m.w + "x" + m.h; scrAsk(120);
     } else if (m.op === "err") { scrStat.textContent = m.msg || "error"; scrAsk(1000); }
     else if (!scrGot) scrStat.textContent = (m.op === "info" ? `host ${m.w}x${m.h}, waiting frames…` : "host: " + m.op);
   };
+  // binary pro tile frame: [u8 'F'][u16 w][u16 h][u16 tile][u16 count] then x,y,w,h,jlen,jpeg
+  onScreenBin = (ab) => {
+    if (!scrOpen || !scrPro) return;
+    const dv = new DataView(ab);
+    if (dv.getUint8(0) !== 0x46) return;              // 'F'
+    const w = dv.getUint16(1, true), h = dv.getUint16(3, true), n = dv.getUint16(7, true);
+    if (scrCanvas.width !== w || scrCanvas.height !== h) { scrCanvas.width = w; scrCanvas.height = h; }
+    let off = 9;
+    const jobs = [];
+    for (let i = 0; i < n; i++) {
+      const x = dv.getUint16(off, true), y = dv.getUint16(off + 2, true);
+      const tw = dv.getUint16(off + 4, true), th = dv.getUint16(off + 6, true);
+      const jl = dv.getUint32(off + 8, true); off += 12;
+      const jpg = new Blob([ab.slice(off, off + jl)], { type: "image/jpeg" }); off += jl;
+      jobs.push(createImageBitmap(jpg).then((b) => { scrCtx.drawImage(b, x, y, tw, th); b.close(); }));
+    }
+    Promise.all(jobs).then(() => {
+      if (!scrGot) { scrGot = true; clearInterval(scrWatch); }
+      scrStat.textContent = `${w}x${h} pro`;
+    }).catch(() => {});
+  };
+  const setPro = async (on) => {
+    const btn = $("#scr-pro");
+    if (on) {
+      scrStat.textContent = "checking pro extension…";
+      let st = await fetch("/api/screen-pro").then((r) => r.json()).catch(() => null);
+      if (!st) { scrStat.textContent = "host unreachable"; return; }
+      if (!st.installed) {
+        if (!confirm("Remote Pro needs a small native agent on the host (~20KB, compiled locally via .NET — no download). Install it now?")) {
+          scrStat.textContent = "";
+          return;
+        }
+        scrStat.textContent = "installing pro extension…";
+        st = await fetch("/api/screen-pro", { method: "POST" }).then((r) => r.json()).catch(() => null);
+        if (!st || !st.ok) { scrStat.textContent = "install failed: " + ((st && st.error) || "see host console"); return; }
+      }
+    }
+    scrSend({ op: "unsub" }, scrPro);                  // leave current mode
+    scrPro = on;
+    btn.classList.toggle("on", scrPro);
+    scrShow();
+    if (scrOpen) { scrGot = false; scrSub(); scrWatchdog(); }
+  };
+  $("#scr-pro").onclick = () => setPro(!scrPro);
   $("#screen-btn").onclick = () => {
     scrModal.classList.remove("hidden"); scrOpen = true;
-    scrImg.removeAttribute("src"); scrStat.textContent = "connecting…";
-    scrSend({ op: "sub", w: scrReqW() });
+    scrImg.removeAttribute("src"); scrShow(); scrStat.textContent = "connecting…";
+    scrSub();
     scrWatchdog();
   };
   $("#scr-close").onclick = () => {
     scrOpen = false; clearTimeout(scrPoll); clearInterval(scrWatch);
-    scrModal.classList.add("hidden"); scrSend({ op: "unsub" });
+    scrModal.classList.add("hidden");
+    scrSend({ op: "unsub" }, false); scrSend({ op: "unsub" }, true);
   };
   $("#scr-rmb").onclick = (e) => { scrArmR = !scrArmR; e.target.classList.toggle("on", scrArmR); };
   $("#scr-kb").onclick = () => $("#scr-keys").classList.toggle("hidden");
@@ -1603,13 +1664,13 @@ $("#new-ok").onclick = () => {
   for (const b of document.querySelectorAll(".scr-k"))
     b.onclick = () => scrSend({ op: "key", k: b.dataset.k });
   // pointer: tap = click, press-and-drag = drag, long-press or armed = right click
-  scrImg.addEventListener("pointerdown", (e) => {
+  scrStage.addEventListener("pointerdown", (e) => {
     e.preventDefault();
     if (scrPt) { scrPt = null; return; }          // second finger cancels
-    scrImg.setPointerCapture(e.pointerId);
+    scrStage.setPointerCapture(e.pointerId);
     scrPt = { x: e.clientX, y: e.clientY, t: Date.now(), drag: false, pid: e.pointerId };
   });
-  scrImg.addEventListener("pointermove", (e) => {
+  scrStage.addEventListener("pointermove", (e) => {
     if (!scrPt || e.pointerId !== scrPt.pid) return;
     if (!scrPt.drag && Math.hypot(e.clientX - scrPt.x, e.clientY - scrPt.y) > 8) {
       scrPt.drag = true;
@@ -1626,14 +1687,14 @@ $("#new-ok").onclick = () => {
     }
     scrArmR = false; $("#scr-rmb").classList.remove("on"); scrPt = null;
   };
-  scrImg.addEventListener("pointerup", scrUp);
-  scrImg.addEventListener("pointercancel", () => { scrPt = null; });
-  scrImg.addEventListener("dblclick", (e) => scrSend({ op: "click", dbl: true, ...scrFrac(e.clientX, e.clientY) }));
-  scrImg.addEventListener("wheel", (e) => {
+  scrStage.addEventListener("pointerup", scrUp);
+  scrStage.addEventListener("pointercancel", () => { scrPt = null; });
+  scrStage.addEventListener("dblclick", (e) => scrSend({ op: "click", dbl: true, ...scrFrac(e.clientX, e.clientY) }));
+  scrStage.addEventListener("wheel", (e) => {
     e.preventDefault();
     scrSend({ op: "scroll", d: Math.sign(e.deltaY) * 360, ...scrFrac(e.clientX, e.clientY) });
   }, { passive: false });
-  scrImg.addEventListener("touchmove", (e) => {           // two-finger scroll
+  scrStage.addEventListener("touchmove", (e) => {           // two-finger scroll
     if (e.touches.length !== 2) { scrT2 = null; return; }
     const y = (e.touches[0].clientY + e.touches[1].clientY) / 2;
     if (scrT2 != null && Math.abs(y - scrT2) > 6) { scrSend({ op: "scroll", x: 0.5, y: 0.5, d: (y - scrT2) * 2 }); scrT2 = y; }

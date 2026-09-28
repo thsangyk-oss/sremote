@@ -4,7 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const { WebSocketServer } = require("ws");
-const { spawn, execFile } = require("child_process");
+const { spawn, execFile, execFileSync } = require("child_process");
 const net = require("net");
 const crypto = require("crypto");
 
@@ -538,6 +538,7 @@ const server = http.createServer((req, res) => {
       wsClients: wss ? wss.clients.size : 0,
       screenSubs: scrSubs().length,
       screenAgent: !!scrAgent, shotBusy: scrShotBusy,
+      screenProSubs: scrProSubs().length, screenProAgent: !!scrProAgent, screenProInstalled: scrProOk(),
       hostSock: !!hostSock, sessions: sessions.size,
     }));
   }
@@ -614,6 +615,17 @@ const server = http.createServer((req, res) => {
       } catch (e) { jsonErr(res, 400, e.code || "fileop failed"); }
     });
   }
+  if (url.pathname === "/api/screen-pro") {
+    if (req.method === "GET") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ installed: scrProOk(), source: fs.existsSync(SCRPRO_CS) }));
+    }
+    if (req.method === "POST") {
+      const r = scrProOk() ? { ok: true, cached: true } : installScreenPro();
+      res.writeHead(r.ok ? 200 : 500, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify(r));
+    }
+  }
   if (url.pathname === "/api/sessions" && req.method === "GET") {
     res.writeHead(200, { "Content-Type": "application/json" });
     return res.end(JSON.stringify(sessionList()));
@@ -689,6 +701,69 @@ function scrCmd(o) {
   catch { scrShotBusy = false; }
 }
 
+// ---------- screen pro (native dxgi agent, binary tile frames) ----------
+const SCRPRO_DIR = path.join(ROOT, "agent", "screen-pro");
+const SCRPRO_EXE = path.join(SCRPRO_DIR, "ScreenPro.exe");
+const SCRPRO_CS = path.join(SCRPRO_DIR, "ScreenPro.cs");
+let scrProAgent = null, scrProBuf = Buffer.alloc(0), scrProKillT = null;
+const scrProOk = () => fs.existsSync(SCRPRO_EXE);
+const scrProSubs = () => [...(wss ? wss.clients : [])].filter((c) => c._screenPro && c.readyState === 1);
+function scrProStopSoon() {
+  clearTimeout(scrProKillT);
+  scrProKillT = setTimeout(() => {
+    if (!scrProSubs().length && scrProAgent) { try { scrProAgent.kill(); } catch {} }
+  }, 30000);
+}
+function scrProEnsure() {
+  if (scrProAgent) return;
+  scrProAgent = spawn(SCRPRO_EXE, [], { stdio: ["pipe", "pipe", "ignore"] });
+  scrProAgent.stdout.on("data", (d) => {
+    scrProBuf = Buffer.concat([scrProBuf, d]);
+    while (scrProBuf.length >= 5) {
+      const len = scrProBuf.readUInt32LE(0);
+      if (scrProBuf.length < 4 + len) break;
+      const t = scrProBuf[4], pl = scrProBuf.slice(5, 4 + len);
+      scrProBuf = scrProBuf.slice(4 + len);
+      if (t === 0x4a) {                              // 'J' -> JSON control msg
+        let m; try { m = JSON.parse(pl.toString("utf8")); } catch { continue; }
+        const out = JSON.stringify({ type: "screen", pro: true, ...m });
+        for (const ws of scrProSubs()) ws.send(out);
+      } else {                                       // 'F' -> binary tile frame
+        const out = Buffer.concat([Buffer.from([t]), pl]);
+        for (const ws of scrProSubs()) ws.send(out, { binary: true });
+      }
+    }
+  });
+  scrProAgent.on("exit", () => {
+    scrProAgent = null; scrProBuf = Buffer.alloc(0);
+    for (const ws of scrProSubs())
+      ws.send(JSON.stringify({ type: "screen", pro: true, op: "err", msg: "pro agent exited" }));
+  });
+}
+function scrProCmd(o) {
+  scrProEnsure();
+  try { scrProAgent.stdin.write(JSON.stringify(o) + "\n"); } catch {}
+}
+function installScreenPro() {
+  if (!fs.existsSync(SCRPRO_CS)) return { ok: false, error: "ScreenPro.cs missing" };
+  const windir = process.env.WINDIR || "C:\\Windows";
+  const csc = [
+    path.join(windir, "Microsoft.NET", "Framework64", "v4.0.30319", "csc.exe"),
+    path.join(windir, "Microsoft.NET", "Framework", "v4.0.30319", "csc.exe"),
+  ].find(fs.existsSync);
+  if (!csc) return { ok: false, error: "no .NET csc.exe found" };
+  fs.mkdirSync(SCRPRO_DIR, { recursive: true });
+  try {
+    execFileSync(csc, ["/nologo", "/unsafe", "/target:exe",
+      `/out:${SCRPRO_EXE}`, "/r:System.Drawing.dll", "/r:System.Windows.Forms.dll",
+      "/r:System.Web.Extensions.dll", SCRPRO_CS], { timeout: 60000, windowsHide: true });
+    return { ok: fs.existsSync(SCRPRO_EXE) };
+  } catch (e) {
+    const out = (e.stdout || e.stderr || e.message || e).toString().slice(0, 500);
+    return { ok: false, error: "compile failed: " + out };
+  }
+}
+
 // ---------- WebSocket ----------
 const wss = new WebSocketServer({ server, path: "/ws" });
 wss.on("connection", (ws, req) => {
@@ -741,7 +816,17 @@ wss.on("connection", (ws, req) => {
           break;
         }
         const { type, ...cmd } = msg;
-        if (msg.op === "sub") {
+        if (msg.pro) {
+          // pro mode: native dxgi agent, push binary tile frames
+          if (!scrProOk()) {
+            ws.send(JSON.stringify({ type: "screen", pro: true, op: "pro-needed" }));
+          } else if (msg.op === "sub") {
+            ws._screenPro = true; clearTimeout(scrProKillT);
+            scrProCmd({ op: "config", w: msg.w || 1280, fps: 15, q: 70 });
+          } else if (msg.op === "unsub") {
+            ws._screenPro = false; scrProStopSoon();
+          } else scrProCmd(cmd);
+        } else if (msg.op === "sub") {
           ws._screen = true; clearTimeout(scrKillT);
           scrCmd({ op: "info" });
           scrCmd({ op: "shot", w: msg.w || 1280, q: 55 });
@@ -759,6 +844,7 @@ wss.on("connection", (ws, req) => {
     for (const s of sessions.values()) s.clients.delete(ws);
     for (const [tok, w] of pendingAttach) if (w === ws) pendingAttach.delete(tok);
     if (ws._screen) { ws._screen = false; scrStopSoon(); }
+    if (ws._screenPro) { ws._screenPro = false; scrProStopSoon(); }
   });
 });
 

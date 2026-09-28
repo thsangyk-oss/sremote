@@ -113,6 +113,27 @@ your viewport width is the practical rate — enough to watch and click
 GUI apps, not a video streamer. UAC/secure-desktop prompts can't be
 captured or clicked (Windows security boundary).
 
+### Pro mode
+
+The **PRO** toggle in the screen window switches to a native push-mode
+agent (`agent/screen-pro/ScreenPro.cs`). On first use it offers to
+install the extension: the host compiles the C# source locally with the
+`csc.exe` that ships with .NET Framework — **no download, ~20 KB exe**.
+
+- **DXGI Desktop Duplication** (GPU-side, event-driven): frames are
+  pushed only when the screen actually changes — idle desktop ≈ zero
+  traffic, changes appear instantly. Falls back to GDI polling when
+  duplication isn't available (multi-monitor: dxgi covers the primary
+  display, bitblt covers the full virtual screen).
+- **64 px tile diffing**: only changed tiles are JPEG-encoded and sent
+  as one binary ws frame — ~1 KB per typical update vs ~50 KB full JPEG.
+- Binary ws transport (no base64), cursor drawn into each frame, same
+  input path. Practical rate ~15 fps, API: same `type:"screen"` ops with
+  `pro:true`; frames arrive as binary `ws` messages instead of JSON.
+- `GET /api/screen-pro` → install status, `POST /api/screen-pro` →
+  compile `ScreenPro.cs` → `ScreenPro.exe`. The exe is gitignored;
+  reinstall is a one-click action per host.
+
 ## HTTP API
 
 Base path for file/git endpoints is `base=` — either `ws:<workspace-id>` or an

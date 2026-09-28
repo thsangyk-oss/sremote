@@ -492,7 +492,8 @@ body.light #file-img { background: repeating-conic-gradient(#dfe4ec 0 25%, #f4f6
 .scr-stat { color: var(--dim); font-size: 11px; font-weight: 400; }
 .scr-spring { flex: 1; }
 #scr-stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; background: #000; touch-action: none; }
-#scr-img { max-width: 100%; max-height: 100%; object-fit: contain; touch-action: none; user-select: none; -webkit-user-select: none; }
+#scr-img, #scr-canvas { max-width: 100%; max-height: 100%; object-fit: contain; touch-action: none; user-select: none; -webkit-user-select: none; }
+#scr-canvas { image-rendering: auto; }
 #scr-keys { display: flex; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--border); align-items: center; }
 #scr-keys input { flex: 1; min-width: 0; background: var(--bg); border: 1px solid var(--border); color: var(--fg); border-radius: 6px; padding: 8px 10px; font: inherit; }
 .mini-btn.on { border-color: var(--accent); color: var(--accent); }
