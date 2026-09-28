@@ -1562,6 +1562,12 @@ $("#new-ok").onclick = () => {
     scrGot = false;
     scrWatch = setInterval(() => {
       if (!scrOpen || scrGot) { clearInterval(scrWatch); return; }
+      if (!wsAlive) {
+        scrStat.textContent = "socket down — reconnecting…";
+        clearTimeout(reconnectTimer);
+        try { connect(); } catch {}
+        return;
+      }
       scrStat.textContent = "waiting for host… (old server? reload/upgrade)";
       scrSend({ op: "sub", w: scrReqW() });
     }, 4000);
