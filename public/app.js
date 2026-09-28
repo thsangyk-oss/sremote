@@ -1556,17 +1556,30 @@ $("#new-ok").onclick = () => {
     clearTimeout(scrPoll);
     if (scrOpen) scrPoll = setTimeout(() => scrSend({ op: "shot", w: scrReqW(), q: 55 }), delay);
   };
+  let scrWatch = null, scrGot = false;
+  const scrWatchdog = () => {
+    clearInterval(scrWatch);
+    scrGot = false;
+    scrWatch = setInterval(() => {
+      if (!scrOpen || scrGot) { clearInterval(scrWatch); return; }
+      scrStat.textContent = "waiting for host… (old server? reload/upgrade)";
+      scrSend({ op: "sub", w: scrReqW() });
+    }, 4000);
+  };
   function onScreenMsg(m) {
-    if (m.op === "frame") { scrImg.src = "data:image/jpeg;base64," + m.b64; scrStat.textContent = m.w + "x" + m.h; scrAsk(120); }
-    else if (m.op === "err") { scrStat.textContent = m.msg || "error"; scrAsk(1000); }
+    if (m.op === "frame") {
+      if (!scrGot) { scrGot = true; clearInterval(scrWatch); }
+      scrImg.src = "data:image/jpeg;base64," + m.b64; scrStat.textContent = m.w + "x" + m.h; scrAsk(120);
+    } else if (m.op === "err") { scrStat.textContent = m.msg || "error"; scrAsk(1000); }
   }
   $("#screen-btn").onclick = () => {
     scrModal.classList.remove("hidden"); scrOpen = true;
     scrImg.removeAttribute("src"); scrStat.textContent = "connecting…";
     scrSend({ op: "sub", w: scrReqW() });
+    scrWatchdog();
   };
   $("#scr-close").onclick = () => {
-    scrOpen = false; clearTimeout(scrPoll);
+    scrOpen = false; clearTimeout(scrPoll); clearInterval(scrWatch);
     scrModal.classList.add("hidden"); scrSend({ op: "unsub" });
   };
   $("#scr-rmb").onclick = (e) => { scrArmR = !scrArmR; e.target.classList.toggle("on", scrArmR); };
