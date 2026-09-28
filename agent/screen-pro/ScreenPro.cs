@@ -38,6 +38,7 @@ class Dxgi : IDisposable {
   [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int MapD(IntPtr s, IntPtr res, uint sub, int map, uint flags, out D3D11_MAPPED_SUBRESOURCE m);
   [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int UnmapD(IntPtr s, IntPtr res, uint sub);
   [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int CopyResD(IntPtr s, IntPtr dst, IntPtr src);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate void OutduplDescD(IntPtr s, IntPtr d); // DXGI_OUTDUPL_DESC
 
   static T M<T>(IntPtr obj, int slot) {
     IntPtr fn = Marshal.ReadIntPtr(Marshal.ReadIntPtr(obj), slot * IntPtr.Size);
@@ -46,11 +47,13 @@ class Dxgi : IDisposable {
   static int Rel(IntPtr p) { return p == IntPtr.Zero ? 0 : M<SimpleD>(p, 2)(p); }
 
   IntPtr dev, ctx, dup, staging;
+  public int W, H, Fmt;
+  public int BlackStreak;
 
-  public int W, H;
   public Dxgi() {
     IntPtr d, c; int lvl;
-    int hr = D3D11CreateDevice(IntPtr.Zero, 1, IntPtr.Zero, 0, IntPtr.Zero, 0, 7, out d, out lvl, out c);
+    // 0x20 = D3D11_CREATE_DEVICE_BGRA_SUPPORT — required for BGRA dup surfaces
+    int hr = D3D11CreateDevice(IntPtr.Zero, 1, IntPtr.Zero, 0x20, IntPtr.Zero, 0, 7, out d, out lvl, out c);
     if (hr != 0) throw new Exception("D3D11CreateDevice " + hr.ToString("X8"));
     dev = d; ctx = c;
     Guid f1 = new Guid("770aae78-f26f-4dba-a829-253c83d1b387");
@@ -70,32 +73,48 @@ class Dxgi : IDisposable {
     Rel(o1);
     if (hr != 0) throw new Exception("dup " + hr.ToString("X8"));
     dup = dp;
-    W = Screen.PrimaryScreen.Bounds.Width; H = Screen.PrimaryScreen.Bounds.Height;
+    // DXGI_OUTDUPL_DESC: ModeDesc{W,H,refresh,format,...}@0 -> W@0 H@4 fmt@16
+    IntPtr odd = Marshal.AllocHGlobal(64);
+    M<OutduplDescD>(dup, 7)(dup, odd);
+    W = Marshal.ReadInt32(odd); H = Marshal.ReadInt32(odd + 4); Fmt = Marshal.ReadInt32(odd + 16);
+    Marshal.FreeHGlobal(odd);
+    if (W <= 0 || H <= 0) throw new Exception("dup desc " + W + "x" + H);
+    if (Fmt != 87) throw new Exception("dup fmt " + Fmt + " (need B8G8R8A8)");
     var sd = new D3D11_TEXTURE2D_DESC();
     sd.Width = (uint)W; sd.Height = (uint)H; sd.MipLevels = 1; sd.ArraySize = 1;
-    sd.Format = 87; sd.SampleCount = 1; sd.Usage = 3; sd.BindFlags = 0; sd.CPUAccessFlags = 0x20000; sd.MiscFlags = 0;
+    sd.Format = 87; sd.SampleCount = 1; sd.Usage = 3; sd.BindFlags = 0;
+    sd.CPUAccessFlags = 0x20000; sd.MiscFlags = 0;
     hr = M<CreateTexD>(dev, 5)(dev, ref sd, IntPtr.Zero, out staging);   // ID3D11Device::CreateTexture2D
     if (hr != 0) throw new Exception("staging " + hr.ToString("X8"));
   }
+  // returns: true = fresh pixels in dst; false = no new desktop content
   public bool Acquire(uint timeoutMs, Bitmap dst) {
     DXGI_OUTDUPL_FRAME_INFO fi; IntPtr res;
     int hr = M<AcquireD>(dup, 8)(dup, timeoutMs, out fi, out res);       // AcquireNextFrame
     if (hr == unchecked((int)0x887A0027)) return false;                  // WAIT_TIMEOUT
     if (hr != 0) throw new Exception("acquire " + hr.ToString("X8"));
     try {
+      if (res == IntPtr.Zero || fi.AccumulatedFrames == 0) return true;  // pointer/metadata only
+      if (dst.Width != W || dst.Height != H) return true;                // caller re-allocs
       M<CopyResD>(ctx, 47)(ctx, staging, res);                           // CopyResource
       D3D11_MAPPED_SUBRESOURCE map;
-      hr = M<MapD>(ctx, 14)(ctx, staging, 0, 1, 0, out map);             // Map READ
-      if (hr == 0) {
-        var bd = dst.LockBits(new Rectangle(0, 0, W, H), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
-        unsafe {
-          byte* s = (byte*)map.pData, d2 = (byte*)bd.Scan0;
-          int rb = W * 4;
-          for (int y = 0; y < H; y++) Buffer.MemoryCopy(s + (long)y * map.RowPitch, d2 + (long)y * bd.Stride, rb, rb);
+      if (M<MapD>(ctx, 14)(ctx, staging, 0, 1, 0, out map) != 0) return true;
+      var bd = dst.LockBits(new Rectangle(0, 0, W, H), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+      bool anyNz = false;
+      unsafe {
+        byte* s = (byte*)map.pData, d2 = (byte*)bd.Scan0;
+        int rb = W * 4;
+        for (int y = 0; y < H; y++) {
+          Buffer.MemoryCopy(s + (long)y * map.RowPitch, d2 + (long)y * bd.Stride, rb, rb);
+          if (!anyNz && BlackStreak <= 3)
+            for (int x = 0; x < rb; x += 4004)                       // 4-aligned: BGR bytes only, skip A
+              if (s[y * map.RowPitch + x] != 0 || s[y * map.RowPitch + x + 1] != 0 || s[y * map.RowPitch + x + 2] != 0) { anyNz = true; break; }
         }
-        dst.UnlockBits(bd);
-        M<UnmapD>(ctx, 15)(ctx, staging, 0);                             // Unmap
       }
+      dst.UnlockBits(bd);
+      M<UnmapD>(ctx, 15)(ctx, staging, 0);                               // Unmap
+      BlackStreak = anyNz ? 0 : BlackStreak + 1;
+      if (BlackStreak > 3) throw new Exception("dxgi frames all-black (driver?)");
     } finally { M<SimpleD>(dup, 14)(dup); Rel(res); }                    // ReleaseFrame + release res
     return true;
   }
@@ -191,8 +210,10 @@ class ScreenPro {
     ep.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, (long)jpegQ);
 
     Dxgi dx = null; string src = "bitblt";
-    try { dx = new Dxgi(); capX = 0; capY = 0; capW = dx.W; capH = dx.H; src = "dxgi"; }
-    catch (Exception e) {
+    try {
+      dx = new Dxgi(); capX = 0; capY = 0;
+      var pb = Screen.PrimaryScreen.Bounds; capW = pb.Width; capH = pb.Height; src = "dxgi";
+    } catch (Exception e) {
       var v = SystemInformation.VirtualScreen; capX = v.Left; capY = v.Top; capW = v.Width; capH = v.Height;
       InfoErr("dxgi off: " + e.Message);
     }
@@ -216,9 +237,13 @@ class ScreenPro {
         if (dx != null) {
           // event-driven: blocks until change or timeout
           got = dx.Acquire((uint)(sizeChanged ? 0 : interval), fullBmp);
+          if (dx.W > 0 && (capW != dx.W || capH != dx.H)) {   // real texture dims arrived
+            capW = dx.W; capH = dx.H; sizeChanged = true;
+            J(new Dictionary<string, object> { { "op", "info" }, { "w", capW }, { "h", capH }, { "src", src } });
+          }
         } else {
           using (var g = Graphics.FromImage(fullBmp))
-            g.CopyFromScreen(capX, capY, 0, 0, new Size(capW, capH), CopyPixelOperation.SourceCopy);
+            g.CopyFromScreen(capX, capY, 0, 0, new Size(capW, capH)); // default op = SRCCOPY|CAPTUREBLT
           got = true;
           Thread.Sleep(Math.Max(5, interval));   // bitblt path is expensive; poll at ~fps
         }
