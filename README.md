@@ -52,12 +52,30 @@ New-NetFirewallRule -DisplayName "S-remote" -Direction Inbound `
 ## Autostart
 
 **Windows:** the `irm` installer registers the `S-remote` task
-automatically. Equivalent manual command:
+automatically, pointing at the tray app when present (see below); it
+falls back to the `HKCU\...\Run` key when `schtasks` needs admin.
+Equivalent manual command:
 
 ```powershell
-schtasks /create /tn "S-remote" /tr "node C:\path\to\S-remote\server.js" `
-  /sc onlogon /rl highest /f
+schtasks /create /tn "S-remote" /tr "C:\path\to\S-remote\agent\tray\SremoteTray.exe" `
+  /sc onlogon /rl limited /f
 ```
+
+### Tray app (no console window)
+
+`agent/tray/SremoteTray.cs` compiles at install time to a `/winexe`
+binary — **zero console windows**. It sits in the notification area
+(drawn "S" icon: green = running, gray = stopped) and owns the
+`node server.js` child process. Right-click menu:
+
+- **Open Web UI** — browser at `localhost:2209`
+- **Start / Stop server** — kills by child handle, or by port-2209
+  ownership when the server was launched outside the tray
+- **Start with Windows** — toggles the HKCU Run key
+- **Exit** — asks whether to stop the server too
+
+The scheduled task / `start.cmd` / HKCU Run entry all prefer the tray
+exe when compiled; without it the old `start /min node` path is used.
 
 **Linux (systemd):**
 

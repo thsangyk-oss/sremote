@@ -88,16 +88,37 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "npm install failed ($LASTEXITCODE)" }
 } finally { Pop-Location }
 
-# ---------- 4. start.cmd + autostart task --------------------------------------
+# ---------- 4. tray app + start.cmd + autostart task ---------------------------
+# compile the tray host (winexe -> no console window ever, icon + start/stop)
+$traySrc = Join-Path $dir 'agent\tray\SremoteTray.cs'
+$trayExe = Join-Path $dir 'agent\tray\SremoteTray.exe'
+$csc = Get-ChildItem "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe" -ErrorAction SilentlyContinue
+if (-not $csc) { $csc = Get-ChildItem "$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\csc.exe" -ErrorAction SilentlyContinue }
+if ($csc -and (Test-Path $traySrc)) {
+    & $csc.FullName /nologo /target:winexe "/out:$trayExe" /r:System.Drawing.dll /r:System.Windows.Forms.dll $traySrc | Out-Null
+    if (Test-Path $trayExe) { Write-Host "    tray app compiled: $trayExe" }
+    else { Write-Host "    WARN: tray compile failed (console start.cmd will be used)" }
+}
+
 @"
 @echo off
 cd /d %~dp0
 if exist "%~dp0node\node.exe" set "PATH=%~dp0node;%PATH%"
+if exist "%~dp0agent\tray\SremoteTray.exe" (start "" "%~dp0agent\tray\SremoteTray.exe" & exit /b)
 start "" /min node server.js
 "@ | Set-Content (Join-Path $dir 'start.cmd') -Encoding ascii
 
-schtasks /create /f /tn $taskName /tr "`"$dir\start.cmd`"" /sc onlogon /rl limited | Out-Null
-if ($LASTEXITCODE -ne 0) { Write-Host "    WARN: could not create scheduled task (autostart skipped)" }
+$launch = if (Test-Path $trayExe) { "`"$trayExe`"" } else { "`"$dir\start.cmd`"" }
+schtasks /create /f /tn $taskName /tr $launch /sc onlogon /rl limited | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    # no admin? fall back to per-user Run key (tray menu manages it too)
+    try {
+        $rk = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+        $exe2 = if (Test-Path $trayExe) { $trayExe } else { Join-Path $dir 'start.cmd' }
+        Set-ItemProperty -Path $rk -Name 'S-remote' -Value ('"' + $exe2 + '"')
+        Write-Host "    autostart via HKCU Run (scheduled task needs admin)"
+    } catch { Write-Host "    WARN: could not register autostart" }
+}
 
 # firewall rule for TCP 2209 - only when elevated; harmless otherwise
 net session >$null 2>&1
@@ -106,6 +127,9 @@ if ($LASTEXITCODE -eq 0) {
 }
 
 # ---------- 5. (re)start -------------------------------------------------------
+# stop old tray first — a running tray won't auto-revive a killed server,
+# and the fresh tray instance below starts the server itself
+Get-Process SremoteTray -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Get-CimInstance Win32_Process -Filter "name='node.exe'" -ErrorAction SilentlyContinue |
     Where-Object { $_.CommandLine -like "*$dir\server.js*" } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
