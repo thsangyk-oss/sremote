@@ -699,9 +699,13 @@ function histPush(v) {
   try { localStorage.setItem("rd.typer.hist", JSON.stringify(typerHist.list)); } catch {}
   typerHist.i = -1; typerHist.draft = "";
 }
+let typerDelta = 0;       // pending #terms height change caused by typer growth
 function typerGrow() { // auto-grow up to ~40% of viewport
+  const prev = typer.offsetHeight;
   typer.style.height = "auto";
   typer.style.height = Math.min(typer.scrollHeight, Math.round(innerHeight * 0.4)) + "px";
+  const d = typer.offsetHeight - prev;
+  if (d) typerDelta += d;   // RO on #terms consumes this and skips the refit
 }
 function histRecall(dir) { // dir -1 = older (ArrowUp), +1 = newer/draft (ArrowDown)
   const n = typerHist.list.length;
@@ -1542,7 +1546,16 @@ $("#new-ok").onclick = () => {
   connect();
   setInterval(() => { if (view === "work") renderSessions(); }, 30000); // keep sess-time fresh
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
-  new ResizeObserver(() => fitVisible()).observe(termsEl);
+  let lastTermsH = termsEl.clientHeight;
+  new ResizeObserver(() => {
+    const h = termsEl.clientHeight, d = h - lastTermsH;
+    lastTermsH = h;
+    // typer wrapping a line shrinks #terms by exactly its growth — that isn't a
+    // real resize, so skip the xterm refit/redraw for it
+    if (d !== 0 && typerDelta && Math.abs(d + typerDelta) <= 2) { typerDelta = 0; return; }
+    typerDelta = 0;
+    fitVisible();
+  }).observe(termsEl);
   // ---------- remote screen ----------
   const scrModal = $("#screen-modal"), scrImg = $("#scr-img"), scrStat = $("#scr-stat");
   const scrStage = $("#scr-stage"), scrCanvas = $("#scr-canvas"), scrCtx = scrCanvas.getContext("2d");

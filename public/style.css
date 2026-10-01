@@ -233,8 +233,9 @@ body.touch-ui #typerow {
   background: var(--bg2); border-top: 1px solid var(--border); flex-shrink: 0;
   position: relative;
 }
+#typer-wrap { position: relative; flex: 1; min-width: 0; display: flex; }
 #typer-menu {
-  position: absolute; bottom: calc(100% + 6px); right: 46px; z-index: 30;
+  position: absolute; bottom: calc(100% + 4px); right: 4px; z-index: 30;
   display: flex; flex-direction: column; gap: 2px; min-width: 178px; padding: 5px;
   background: var(--bg2); border: 1px solid var(--border-hi); border-radius: 10px;
   box-shadow: var(--shadow);
@@ -251,7 +252,7 @@ body.touch-ui #typerow {
 body.touch-ui .tm-touch { display: flex; }
 #typer {
   flex: 1; min-width: 0; background: var(--bg); border: 1px solid var(--border);
-  color: var(--fg); border-radius: 8px; padding: 9px 12px; font: 15px/1.2 "Cascadia Code", Consolas, monospace;
+  color: var(--fg); border-radius: 8px; padding: 9px 40px 9px 12px; font: 15px/1.2 "Cascadia Code", Consolas, monospace;
   resize: none; overflow-y: auto; display: block;
 }
 #typer:focus { border-color: var(--accent); outline: none; }
@@ -262,6 +263,11 @@ body.touch-ui .tm-touch { display: flex; }
   background: var(--bg3); color: var(--fg); border: 1px solid var(--border);
   border-radius: 8px; touch-action: manipulation;
 }
+#typer-more {                            /* "+" chip floating inside the textarea */
+  position: absolute; right: 5px; bottom: 5px; width: 30px; height: 30px;
+  font-size: 12px; opacity: .85; z-index: 2;
+}
+#typer-more:active { opacity: 1; }
 .ty-btn:active { filter: brightness(1.3); }
 .ty-primary { background: linear-gradient(135deg, #5aa2ff, #37d99a); color: #071019; border: 0; }
 body.touch-ui #keybar {
