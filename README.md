@@ -25,6 +25,15 @@ Node.js portable if missing, runs `npm install --omit=dev`, registers a
 Install dir defaults to `%LOCALAPPDATA%\S-remote` — override with
 `$env:SREMOTE_DIR`, skip the overwrite prompt with `$env:SREMOTE_YES=1`.
 
+**Workspaces gone after updating to v1.7.3 or older?** Those installers
+could miss a custom install dir (e.g. `C:\sremote`) and do a fresh
+install under `%LOCALAPPDATA%` — your old `state.json` is still on disk.
+Run this to find it and restore workspaces into the active install:
+
+```powershell
+irm https://raw.githubusercontent.com/thsangyk-oss/sremote/main/fix-state.ps1 | iex
+```
+
 Then open from any device in the tailnet:
 
 ```
