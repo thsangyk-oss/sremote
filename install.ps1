@@ -64,11 +64,15 @@ if ($update -and (Test-Path "$dir\.git") -and -not $env:SREMOTE_DIR -and -not $e
 }
 New-Item -ItemType Directory -Force $dir | Out-Null
 
+$relTag = ""
+try { $relTag = (Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest" -TimeoutSec 6).tag_name } catch {}
+
 $zip = Join-Path $env:TEMP ("sremote-" + [guid]::NewGuid() + ".zip")
 try {
     Invoke-RestMethod "https://github.com/$repo/releases/latest/download/sremote-server.zip" -OutFile $zip
 } catch {
     Write-Host "    release asset unavailable - falling back to main branch"
+    $relTag = "main"
     Invoke-RestMethod "https://github.com/$repo/archive/refs/heads/main.zip" -OutFile $zip
 }
 $tmp = Join-Path $env:TEMP ("sremote-src-" + [guid]::NewGuid())
@@ -155,6 +159,7 @@ try {
     Write-Host ""
     Write-Host "OK - S-remote $(if($update){'updated'}else{'installed'}) (server starting...)"
 }
+if ($relTag) { Write-Host "    Install complete — version $relTag" }
 Write-Host "    Local:     http://localhost:2209"
 Write-Host "    Tailscale: http://<this-machine-tailscale-ip>:2209"
 Write-Host "    Dir:       $dir  (autostarts at logon)"
