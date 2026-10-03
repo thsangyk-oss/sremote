@@ -27,6 +27,21 @@ function Find-InstallDir {
                 if (Test-Path (Join-Path $d 'server.js')) { return $d }
             }
         }
+    # autostart Run key points at tray exe / start.cmd inside the install dir
+    foreach ($rk in 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run',
+                    'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run') {
+        try { $v = (Get-ItemProperty $rk -Name 'S-remote' -ErrorAction Stop).'S-remote'
+              $exe = ($v -replace '"','')
+              $d = Split-Path $exe -Parent
+              if ($d -and (Test-Path (Join-Path $d 'server.js'))) { return $d }
+              $d2 = Split-Path (Split-Path $d -Parent) -Parent   # exe may live in agent\tray
+              if ($d2 -and (Test-Path (Join-Path $d2 'server.js'))) { return $d2 } } catch {}
+    }
+    # custom install dirs: probe drive roots for sremote-ish folders
+    foreach ($drv in (Get-PSDrive -PSProvider FileSystem)) {
+        foreach ($name in 'S-remote','Sremote','sremote') {
+            $d = Join-Path $drv.Root $name
+            if (Test-Path (Join-Path $d 'server.js')) { return $d } } }
     # well-known spots
     foreach ($d in @("$env:LOCALAPPDATA\S-remote", "$env:USERPROFILE\S-remote")) {
         if (Test-Path (Join-Path $d 'server.js')) { return $d } }
@@ -63,6 +78,13 @@ if ($update -and (Test-Path "$dir\.git") -and -not $env:SREMOTE_DIR -and -not $e
     if ($a -notmatch '^(y|yes)$') { Write-Host "    Aborted."; return }
 }
 New-Item -ItemType Directory -Force $dir | Out-Null
+
+# preserve user state across updates (workspaces/session history live in the install dir)
+if ($update) {
+    foreach ($f in 'state.json','data') {
+        $p = Join-Path $dir $f
+        if (Test-Path $p) { Copy-Item $p "$p.install-bak" -Recurse -Force -ErrorAction SilentlyContinue } }
+}
 
 $relTag = ""
 try { $relTag = (Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest" -TimeoutSec 6).tag_name } catch {}
@@ -137,16 +159,16 @@ Get-Process SremoteTray -ErrorAction SilentlyContinue | Stop-Process -Force -Err
 Get-CimInstance Win32_Process -Filter "name='node.exe'" -ErrorAction SilentlyContinue |
     Where-Object { $_.CommandLine -like "*$dir\server.js*" } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-if ($update) {
-    # server launched as "node server.js" (relative) hides its dir from cmdline -
-    # attribute by port instead: the node process listening on :2209 is ours
-    Get-NetTCPConnection -LocalPort 2209 -State Listen -ErrorAction SilentlyContinue |
-        Select-Object -ExpandProperty OwningProcess -Unique |
-        ForEach-Object {
-            $p = Get-Process -Id $_ -ErrorAction SilentlyContinue
-            if ($p -and $p.ProcessName -eq 'node') { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
-        }
-}
+# server launched as "node server.js" (relative) hides its dir from cmdline -
+# attribute by port instead: the node process listening on :2209 is ours.
+# always do this (not only on update): a stale server from another dir would
+# hold the port and make the fresh install look broken
+Get-NetTCPConnection -LocalPort 2209 -State Listen -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty OwningProcess -Unique |
+    ForEach-Object {
+        $p = Get-Process -Id $_ -ErrorAction SilentlyContinue
+        if ($p -and $p.ProcessName -eq 'node') { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
+    }
 schtasks /run /tn $taskName >$null 2>&1
 if ($LASTEXITCODE -ne 0) { Start-Process -FilePath "$dir\start.cmd" -WindowStyle Hidden }
 Start-Sleep -Seconds 2
