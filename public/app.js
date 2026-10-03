@@ -218,18 +218,25 @@ function ensurePane(id) {
   if (window.WebLinksAddon) { try { term.loadAddon(new WebLinksAddon.WebLinksAddon()); } catch {} }
   if (window.Unicode11Addon) { try { term.loadAddon(new Unicode11Addon.Unicode11Addon()); term.unicode.activeVersion = "11"; } catch {} }
   term.open(el);
-  // mobile: touch lands on .xterm-screen, which covers the real scroller
-  // (.xterm-viewport) — feed drag deltas to scrollTop so scrollback is swipeable
-  const vp = el.querySelector(".xterm-viewport");
-  let tY = null;
-  el.addEventListener("touchstart", (e) => { tY = e.touches.length === 1 ? e.touches[0].clientY : null; }, { passive: true });
+  // mobile swipe-scroll: xterm v6 uses a virtual SmoothScrollableElement —
+  // scrollTop hacks no longer work; feed finger deltas to term.scrollLines
+  let tY = null, tAcc = 0;
+  const linePx = () => {
+    const d = term._core && term._core._renderService && term._core._renderService.dimensions;
+    return (d && d.css && d.css.cell && d.css.cell.height) || 17;
+  };
+  el.addEventListener("touchstart", (e) => { tY = e.touches.length === 1 ? e.touches[0].clientY : null; tAcc = 0; }, { passive: true });
   el.addEventListener("touchmove", (e) => {
     if (tY == null || e.touches.length !== 1) return;
     const y = e.touches[0].clientY, dy = tY - y;
     tY = y;
-    if (vp && dy) vp.scrollTop += dy;
+    if (!dy) return;
+    tAcc += dy / linePx();
+    const n = Math.trunc(tAcc);
+    if (n) { tAcc -= n; term.scrollLines(n); }
   }, { passive: true });
   el.addEventListener("touchend", () => { tY = null; }, { passive: true });
+  el.addEventListener("touchcancel", () => { tY = null; }, { passive: true });
   term.onData((d) => send({ type: "in", id, data: d }));
   term.onResize(({ cols, rows }) => send({ type: "resize", id, cols, rows }));
   term.onTitleChange((t) => { p.title = t; renderTabs(); });
