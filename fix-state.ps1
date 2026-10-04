@@ -37,14 +37,35 @@ foreach ($rk in 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run',
           if ($d2 -and (Test-Path (Join-Path $d2 'state.json'))) { $found[$d2] = $true } } catch {}
 }
 
-$best = $null; $bestN = -1
+$best = $null; $bestN = -1; $liveDir = $null
 foreach ($d in $found.Keys) {
     if (([IO.Path]::GetFullPath($d)) -eq ([IO.Path]::GetFullPath($cur))) { continue }
     $n = 0
     try { $n = @((Get-Content (Join-Path $d 'state.json') -Raw | ConvertFrom-Json).workspaces).Count } catch {}
-    Write-Host ("    found: {0,-50} workspaces: {1}" -f $d, $n)
+    # live session broker? session-host.js runs with an absolute path arg,
+    # so its command line contains "<dir>\agent\session-host.js"
+    $esc = [regex]::Escape((Join-Path $d 'agent\session-host.js'))
+    $live = [bool](Get-CimInstance Win32_Process -Filter "name='node.exe'" -ErrorAction SilentlyContinue |
+             Where-Object { $_.CommandLine -match $esc })
+    Write-Host ("    found: {0,-50} workspaces: {1}  broker: {2}" -f $d, $n, $(if ($live) {'ALIVE'} else {'dead'}))
     if ($n -gt $bestN) { $best = $d; $bestN = $n }
+    if ($live -and -not $liveDir) { $liveDir = $d }
 }
+
+# A still-running session broker holds the live terminal sessions inside its
+# own install dir (the pipe name is hashed from that dir) — the only way to
+# get them back is to update that dir in place and run the server from there.
+if ($liveDir) {
+    Write-Host "    live sessions detected in $liveDir"
+    Write-Host "    -> updating that install dir in place (server re-attaches its broker)"
+    $env:SREMOTE_DIR = $liveDir
+    Invoke-Expression (Invoke-RestMethod 'https://raw.githubusercontent.com/thsangyk-oss/sremote/main/install.ps1')
+    Write-Host ""
+    Write-Host "OK - server now runs from $liveDir with your live sessions restored."
+    Write-Host "    the $cur install is now unused and can be deleted."
+    return
+}
+
 if (-not $best -or $bestN -le 0) {
     Write-Host "    no older install with saved workspaces found - nothing to restore"
     return
