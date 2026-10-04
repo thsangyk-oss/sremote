@@ -27,8 +27,9 @@ Install dir defaults to `%LOCALAPPDATA%\S-remote` — override with
 
 **Workspaces gone after updating to v1.7.3 or older?** Those installers
 could miss a custom install dir (e.g. `C:\sremote`) and do a fresh
-install under `%LOCALAPPDATA%` — your old `state.json` is still on disk.
-Run this to find it and restore workspaces into the active install:
+install under `%LOCALAPPDATA%` — your old install (workspaces + live
+sessions) is still on disk. Run this to update the original dir in
+place and remove the duplicate:
 
 ```powershell
 irm https://raw.githubusercontent.com/thsangyk-oss/sremote/main/fix-state.ps1 | iex
