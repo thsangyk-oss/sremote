@@ -1,7 +1,10 @@
 # S-remote state recovery
 #   irm https://raw.githubusercontent.com/thsangyk-oss/sremote/main/fix-state.ps1 | iex
-# Restores state.json (workspaces + session history) after an update that
-# installed into a different directory than the original one.
+# Repairs machines where an old installer missed the original install dir
+# (e.g. C:\sremote) and did a fresh install into %LOCALAPPDATA% — wiping the
+# visible workspaces. This script updates the ORIGINAL dir in place (keeping
+# its state.json and re-attaching its live session broker), then removes the
+# duplicate install dir the bad update created.
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
@@ -13,9 +16,8 @@ try { $r = Invoke-RestMethod 'http://localhost:2209/api/info' -TimeoutSec 3
       if ($r.root) { $cur = $r.root } } catch {}
 if (-not $cur) { $cur = Join-Path $env:LOCALAPPDATA 'S-remote' }
 Write-Host "    current install: $cur"
-if (-not (Test-Path (Join-Path $cur 'server.js'))) { throw "no server.js in $cur" }
 
-# ---------- find every other dir that still holds a state.json -----------------
+# ---------- find the ORIGINAL install dir (has state.json / live broker) -------
 $found = @{}
 # 1) any top-level dir on any drive with server.js + state.json (custom installs)
 foreach ($drv in (Get-PSDrive -PSProvider FileSystem)) {
@@ -37,7 +39,7 @@ foreach ($rk in 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run',
           if ($d2 -and (Test-Path (Join-Path $d2 'state.json'))) { $found[$d2] = $true } } catch {}
 }
 
-$best = $null; $bestN = -1; $liveDir = $null
+$target = $null; $best = $null; $bestN = -1
 foreach ($d in $found.Keys) {
     if (([IO.Path]::GetFullPath($d)) -eq ([IO.Path]::GetFullPath($cur))) { continue }
     $n = 0
@@ -48,56 +50,39 @@ foreach ($d in $found.Keys) {
     $live = [bool](Get-CimInstance Win32_Process -Filter "name='node.exe'" -ErrorAction SilentlyContinue |
              Where-Object { $_.CommandLine -match $esc })
     Write-Host ("    found: {0,-50} workspaces: {1}  broker: {2}" -f $d, $n, $(if ($live) {'ALIVE'} else {'dead'}))
+    # a live broker holds the user's live terminal sessions -> always prefer it
+    if ($live) { $target = $d; break }
     if ($n -gt $bestN) { $best = $d; $bestN = $n }
-    if ($live -and -not $liveDir) { $liveDir = $d }
 }
-
-# A still-running session broker holds the live terminal sessions inside its
-# own install dir (the pipe name is hashed from that dir) — the only way to
-# get them back is to update that dir in place and run the server from there.
-if ($liveDir) {
-    Write-Host "    live sessions detected in $liveDir"
-    Write-Host "    -> updating that install dir in place (server re-attaches its broker)"
-    $env:SREMOTE_DIR = $liveDir
-    Invoke-Expression (Invoke-RestMethod 'https://raw.githubusercontent.com/thsangyk-oss/sremote/main/install.ps1')
-    Write-Host ""
-    Write-Host "OK - server now runs from $liveDir with your live sessions restored."
-    Write-Host "    the $cur install is now unused and can be deleted."
-    return
-}
-
-if (-not $best -or $bestN -le 0) {
+if (-not $target) { $target = $best }
+if (-not $target) {
     Write-Host "    no older install with saved workspaces found - nothing to restore"
     return
 }
 
-# ---------- migrate state -------------------------------------------------------
-Write-Host "    restoring $bestN workspace(s) from $best"
-foreach ($f in 'state.json','data') {
-    $dst = Join-Path $cur $f
-    if (Test-Path $dst) { Copy-Item $dst "$dst.recover-bak" -Recurse -Force -ErrorAction SilentlyContinue }
-    $src = Join-Path $best $f
-    if (Test-Path $src) { Copy-Item $src $dst -Recurse -Force }
+# ---------- update the ORIGINAL dir in place ------------------------------------
+Write-Host "    -> updating original install at $target"
+Write-Host "       (server re-attaches its session broker -> workspaces + live sessions return)"
+$env:SREMOTE_DIR = $target
+Invoke-Expression (Invoke-RestMethod 'https://raw.githubusercontent.com/thsangyk-oss/sremote/main/install.ps1')
+
+# ---------- remove the duplicate dir the bad update created ---------------------
+if ([IO.Path]::GetFullPath($cur) -ne [IO.Path]::GetFullPath($target) -and (Test-Path $cur)) {
+    Write-Host ""
+    Write-Host "==> removing duplicate install at $cur"
+    # kill any leftover processes that lock files inside $cur
+    $esc = [regex]::Escape($cur)
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match $esc -or $_.ExecutablePath -match $esc } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    Get-Process SremoteTray -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -match $esc } | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
+    try { Remove-Item $cur -Recurse -Force -ErrorAction Stop
+          Write-Host "    removed $cur" }
+    catch { Write-Host "    WARN: could not fully remove $cur - delete it manually after a reboot" }
 }
 
-# ---------- restart server on the current install -------------------------------
-Get-Process SremoteTray -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-Get-NetTCPConnection -LocalPort 2209 -State Listen -ErrorAction SilentlyContinue |
-    Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object {
-        $p = Get-Process -Id $_ -ErrorAction SilentlyContinue
-        if ($p -and $p.ProcessName -eq 'node') { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue } }
-$tray = Join-Path $cur 'agent\tray\SremoteTray.exe'
-schtasks /run /tn 'S-remote' >$null 2>&1
-if ($LASTEXITCODE -ne 0) {
-    if (Test-Path $tray) { Start-Process -FilePath $tray }
-    else { Start-Process -FilePath (Join-Path $cur 'start.cmd') -WindowStyle Hidden }
-}
-Start-Sleep -Seconds 2
-
-try {
-    $w = Invoke-RestMethod 'http://localhost:2209/api/workspaces' -TimeoutSec 4
-    Write-Host "OK - restored. workspaces now: $(@($w).Count)"
-    Write-Host "    reload the web UI to see them"
-} catch {
-    Write-Host "OK - state restored (server still starting - reload the UI in a few seconds)"
-}
+Write-Host ""
+Write-Host "OK - S-remote restored to original dir: $target"
+Write-Host "    reload the web UI - workspaces and live sessions should be back"
