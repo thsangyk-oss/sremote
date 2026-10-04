@@ -36,6 +36,23 @@ function toast(msg, kind = "ok") {
   setTimeout(() => { t.classList.add("out"); setTimeout(() => t.remove(), 260); }, 3200);
 }
 
+// clipboard works over plain http too (tailscale isn't a secure context)
+function copyToClipboard(t) {
+  if (navigator.clipboard?.writeText) { navigator.clipboard.writeText(t).catch(() => fallbackCopy(t)); return; }
+  fallbackCopy(t);
+}
+function fallbackCopy(t) {
+  const ta = document.createElement("textarea");
+  ta.value = t; ta.style.cssText = "position:fixed;top:0;left:0;opacity:0";
+  document.body.appendChild(ta); ta.focus(); ta.select();
+  try { document.execCommand("copy"); } catch {}
+  ta.remove();
+}
+function copySel(term) {
+  const t = term.getSelection && term.getSelection();
+  if (t) { copyToClipboard(t); toast(`Copied ${t.length} chars`); }
+}
+
 // touch devices get the keybar; drawer/scrim layout follows viewport width —
 // a desktop with a touchscreen is coarse but NOT narrow. Some mobile browsers
 // misreport pointer:coarse, so the keybar also shows on narrow screens.
@@ -219,30 +236,74 @@ function ensurePane(id) {
   if (window.Unicode11Addon) { try { term.loadAddon(new Unicode11Addon.Unicode11Addon()); term.unicode.activeVersion = "11"; } catch {} }
   term.open(el);
   // mobile swipe-scroll: xterm v6 uses a virtual SmoothScrollableElement —
-  // scrollTop hacks no longer work; feed finger deltas to term.scrollLines
-  let tY = null, tAcc = 0;
+  // scrollTop hacks no longer work; feed finger deltas to term.scrollLines.
+  // Long-press (~450ms, no move) switches to select mode: synthesized mouse
+  // events drive xterm's own drag-select; on release the selection is copied.
+  let tY = null, tAcc = 0, selMode = false, suppressCtx = false;
+  let lpTimer = null, lpX = 0, lpY = 0;
   const linePx = () => {
     const d = term._core && term._core._renderService && term._core._renderService.dimensions;
     return (d && d.css && d.css.cell && d.css.cell.height) || 17;
   };
-  el.addEventListener("touchstart", (e) => { tY = e.touches.length === 1 ? e.touches[0].clientY : null; tAcc = 0; }, { passive: true });
+  const scrEl = () => el.querySelector(".xterm-screen") || el;
+  const fireMouse = (type, x, y, tgt) =>
+    (tgt || document).dispatchEvent(new MouseEvent(type, { clientX: x, clientY: y, button: 0, bubbles: true, cancelable: true }));
+  const clearLp = () => { if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; } };
+  el.addEventListener("touchstart", (e) => {
+    tY = e.touches.length === 1 ? e.touches[0].clientY : null; tAcc = 0;
+    if (e.touches.length === 1) {
+      lpX = e.touches[0].clientX; lpY = e.touches[0].clientY;
+      lpTimer = setTimeout(() => {
+        lpTimer = null; selMode = true; tY = null;
+        try { navigator.vibrate && navigator.vibrate(15); } catch {}
+        fireMouse("mousedown", lpX, lpY, scrEl());
+      }, 450);
+    }
+  }, { passive: true });
   el.addEventListener("touchmove", (e) => {
-    if (tY == null || e.touches.length !== 1) return;
-    const y = e.touches[0].clientY, dy = tY - y;
+    if (e.touches.length !== 1) return;
+    const t = e.touches[0];
+    if (selMode) { fireMouse("mousemove", t.clientX, t.clientY); return; }
+    const ddx = t.clientX - lpX, ddy = t.clientY - lpY;
+    if (ddx * ddx + ddy * ddy > 120) clearLp();
+    if (tY == null) return;
+    const y = t.clientY, dy = tY - y;
     tY = y;
     if (!dy) return;
     tAcc += dy / linePx();
     const n = Math.trunc(tAcc);
     if (n) { tAcc -= n; term.scrollLines(n); }
   }, { passive: true });
-  el.addEventListener("touchend", () => { tY = null; }, { passive: true });
-  el.addEventListener("touchcancel", () => { tY = null; }, { passive: true });
+  const endTouch = () => {
+    tY = null; clearLp();
+    if (selMode) {
+      selMode = false; suppressCtx = true;
+      fireMouse("mouseup", lpX, lpY);
+      copySel(term);
+    }
+  };
+  el.addEventListener("touchend", endTouch, { passive: true });
+  el.addEventListener("touchcancel", endTouch, { passive: true });
+  el.addEventListener("contextmenu", (e) => { if (suppressCtx) { suppressCtx = false; e.preventDefault(); } });
+  el.addEventListener("mouseup", () => setTimeout(() => copySel(term), 0)); // desktop drag-select → auto-copy
+  // jump-to-latest: floating button, visible only while scrolled away from the bottom
+  const jumpBtn = document.createElement("button");
+  jumpBtn.className = "jump-latest hidden";
+  jumpBtn.textContent = "↓";
+  jumpBtn.title = "Jump to latest";
+  jumpBtn.onclick = () => { term.scrollToBottom(); term.focus(); };
+  el.appendChild(jumpBtn);
+  term.onScroll(() => {
+    const b = term.buffer.active;
+    jumpBtn.className = (b.viewportY < b.baseY) ? "jump-latest" : "jump-latest hidden";
+  });
   term.onData((d) => send({ type: "in", id, data: d }));
   term.onResize(({ cols, rows }) => send({ type: "resize", id, cols, rows }));
   term.onTitleChange((t) => { p.title = t; renderTabs(); });
   term.attachCustomKeyEventHandler((e) => {
     if (e.type === "keydown" && e.shiftKey && e.key === "Enter") { send({ type: "in", id, data: "\x1b\r" }); return false; } // Shift+Enter → Alt+Enter (Devin newline)
     if (e.type === "keydown" && e.ctrlKey && e.shiftKey && e.key === "V") { navigator.clipboard.readText().then((t) => send({ type: "in", id, data: t })); return false; }
+    if (e.type === "keydown" && e.ctrlKey && e.shiftKey && e.key === "C") { copySel(term); return false; }
     if (e.type === "keydown" && e.ctrlKey && !e.shiftKey && e.key === "f") { openTermSearch(); return false; } // Ctrl+F search
     if (e.type === "keydown" && e.ctrlKey && !e.shiftKey && !e.altKey && (e.key === "k" || e.key === "K")) { openPalette(); return false; } // Ctrl+K palette
     return true;

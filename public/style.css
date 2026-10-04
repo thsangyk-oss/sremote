@@ -91,6 +91,8 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 #terms { flex: 1; position: relative; padding: 6px 0 0 8px; }
 .term-pane { position: absolute; inset: 6px 0 0 8px; }
 .term-pane.hidden, .hidden { display: none !important; }
+.jump-latest { position: absolute; right: 16px; bottom: 12px; z-index: 6; width: 34px; height: 34px; border-radius: 50%; background: var(--bg2); border: 1px solid var(--border); color: var(--fg); font-size: 15px; opacity: .85; cursor: pointer; }
+.jump-latest:active { background: var(--bg3); }
 
 .side-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 12px 8px; gap: 6px; }
 .side-brand { display: flex; align-items: center; gap: 8px; font-weight: 800; font-size: 13px; cursor: pointer; padding: 4px 6px; border-radius: 7px; transition: background .15s; }
