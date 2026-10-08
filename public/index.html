@@ -9,17 +9,17 @@
 <title>S-remote</title>
 <link rel="icon" type="image/svg+xml" href="/logo.svg">
 <link rel="apple-touch-icon" href="/logo.svg">
-<meta name="theme-color" content="#0a0d12">
+<meta name="theme-color" content="#070a10">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="stylesheet" href="/vendor/xterm.css">
-<link rel="stylesheet" href="/style.css?v=18">
+<link rel="stylesheet" href="/style.css?v=19">
 </head>
 <body>
 
 <!-- ============ HOME: pick a workspace ============ -->
 <div id="view-home">
   <div class="home-head">
-    <div class="brand"><img src="/logo.svg" alt="S-remote">S<span>-</span>remote</div>
+    <div class="brand"><img src="/logo.svg" alt="S-remote"><span class="brand-txt">S<i>-</i>remote</span></div>
     <div class="conn-pill"><span class="dot" id="conn-dot"></span><span id="conn-text">connecting…</span><span id="latency"></span></div>
   </div>
   <div class="home-body">
@@ -50,7 +50,7 @@
   <aside id="sidebar">
     <div class="side-head">
       <div class="side-brand" id="home-btn" title="Back to workspaces"><img src="/logo.svg" alt="">S-remote</div>
-      <button id="side-collapse" class="mini-btn" title="Hide panel (Ctrl+B)">«</button>
+      <button id="side-collapse" class="mini-btn" title="Hide panel (Ctrl+B)"><svg class="ic" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18M16 10l-2 2 2 2"/></svg></button>
     </div>
     <div id="ws-title"></div>
     <div class="side-section">
@@ -61,20 +61,20 @@
     <div class="side-foot">
       <div id="host-info"></div>
       <div id="conn2"><span class="dot" id="conn-dot2"></span><span id="conn-text2">connecting…</span><span id="latency2"></span></div>
-      <button id="side-set" class="mini-btn" title="Settings">⚙ Settings</button>
+      <button id="side-set" class="mini-btn" title="Settings"><svg class="ic" viewBox="0 0 24 24"><path d="M20 7h-9M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg>Settings</button>
     </div>
   </aside>
   <div class="resizer" id="rs-side"></div>
   <div id="scrim"></div>
   <main id="main">
     <div id="topbar">
-      <button id="rail-open" class="mini-btn hidden" title="Show panel (Ctrl+B)">☰</button>
+      <button id="rail-open" class="mini-btn hidden" title="Show panel (Ctrl+B)"><svg class="ic" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
       <div id="tabs"></div>
-      <button id="pal-btn" class="mini-btn" title="Command palette (Ctrl+K)">🔍</button>
-      <button id="screen-btn" class="mini-btn" title="Remote screen">🖥</button>
-      <button id="split-btn" class="mini-btn" title="Split terminal">◫</button>
-      <button id="set-btn" class="mini-btn" title="Settings">⚙</button>
-      <button id="files-toggle" class="mini-btn on" title="Toggle files (Ctrl+J)">Files</button>
+      <button id="pal-btn" class="mini-btn" title="Command palette (Ctrl+K)"><svg class="ic" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></button>
+      <button id="screen-btn" class="mini-btn" title="Remote screen"><svg class="ic" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg></button>
+      <button id="split-btn" class="mini-btn" title="Split terminal"><svg class="ic" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M12 3v18"/></svg></button>
+      <button id="set-btn" class="mini-btn" title="Settings"><svg class="ic" viewBox="0 0 24 24"><path d="M20 7h-9M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg></button>
+      <button id="files-toggle" class="mini-btn on" title="Toggle files (Ctrl+J)"><svg class="ic" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>Files</button>
     </div>
     <div id="terms"></div>
     <div id="term-search" class="hidden">
@@ -115,11 +115,11 @@
     <div class="fp-head">
       <span class="fp-title">Files</span>
       <button id="fp-diff" class="mini-btn hidden" title="Git diff vs HEAD">Diff</button>
-      <button id="fp-newfile" class="mini-btn" title="New file here">＋</button>
-      <button id="fp-newdir" class="mini-btn" title="New folder here">📁</button>
-      <button id="fp-upload" class="mini-btn" title="Upload into current folder">⇪</button>
-      <button id="fp-refresh" class="mini-btn" title="Refresh">⟳</button>
-      <button id="fp-close" class="mini-btn" title="Hide (Ctrl+J)">×</button>
+      <button id="fp-newfile" class="mini-btn" title="New file here"><svg class="ic" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M12 12v6M9 15h6"/></svg></button>
+      <button id="fp-newdir" class="mini-btn" title="New folder here"><svg class="ic" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 10v6M9 13h6"/></svg></button>
+      <button id="fp-upload" class="mini-btn" title="Upload into current folder"><svg class="ic" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg></button>
+      <button id="fp-refresh" class="mini-btn" title="Refresh"><svg class="ic" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36L21 8"/><path d="M21 3v5h-5"/></svg></button>
+      <button id="fp-close" class="mini-btn" title="Hide (Ctrl+J)"><svg class="ic" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
     </div>
     <div id="fp-crumbs"></div>
     <div id="fp-list"></div>
