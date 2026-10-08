@@ -27,6 +27,7 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -44,49 +45,55 @@ public class HostActivity extends Activity {
     private static final int REQ_FILE = 77;
 
     private WebView web;
-    private View errView, root;
-    private TextView errDetail;
-    private String url, name;
+    private View errView, root, statusDot;
+    private TextView errDetail, titleView, statusView;
+    private String url, name, hostId;
     private ValueCallback<Uri[]> fileCb;
     private Uri cameraUri;
     private int lastKb = 0;
+    private Ui ui;
+    private final Runnable onState = this::renderStatus;
 
-    private int dp(float v) { return (int) (v * getResources().getDisplayMetrics().density + .5f); }
-    private int col(int res) { return getColor(res); }
+    private int dp(float v) { return ui.dp(v); }
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
         url = getIntent().getStringExtra(EXTRA_URL);
         name = getIntent().getStringExtra(EXTRA_NAME);
+        hostId = getIntent().getStringExtra(EXTRA_HOST_ID);
         if (url == null) { finish(); return; }
+        ui = new Ui(this);
+        ui.applyWindow(this, ui.container);
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(col(R.color.bg));
+        root.setBackgroundColor(ui.surface);
 
-        // toolbar
-        LinearLayout bar = new LinearLayout(this);
-        bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setPadding(dp(6), dp(6), dp(6), dp(6));
-        bar.setBackgroundColor(col(R.color.panel));
-        TextView back = new TextView(this);
-        back.setText("‹"); back.setTextSize(26); back.setTextColor(col(R.color.fg));
-        back.setPadding(dp(10), 0, dp(10), 0);
+        // slim toolbar: back · name + live status · reload
+        LinearLayout bar = ui.hrow();
+        bar.setPadding(dp(2), 0, dp(2), 0);
+        bar.setMinimumHeight(dp(52));
+        bar.setBackgroundColor(ui.container);
+        ImageView back = ui.iconButton(R.drawable.ic_back, ui.onSurface);
+        back.setContentDescription("Back");
         back.setOnClickListener(v -> finish());
         bar.addView(back);
 
-        LinearLayout tc = new LinearLayout(this);
-        tc.setOrientation(LinearLayout.VERTICAL);
-        TextView t = new TextView(this); t.setText(name); t.setTextSize(15);
-        t.setTextColor(col(R.color.fg)); t.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        TextView u = new TextView(this); u.setText(url.replaceFirst("^[a-z]+://", ""));
-        u.setTextSize(11); u.setTextColor(col(R.color.dim));
-        tc.addView(t); tc.addView(u);
-        bar.addView(tc, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        LinearLayout tc = ui.vcol();
+        titleView = ui.oneLine(ui.text(name, 16, ui.onSurface, true));
+        LinearLayout st = ui.hrow();
+        statusDot = ui.dot(ui.outline, 7);
+        st.addView(statusDot);
+        statusView = ui.oneLine(ui.text("", 12, ui.onSurfaceVariant, false));
+        statusView.setPadding(dp(6), 0, 0, 0);
+        st.addView(statusView);
+        tc.addView(titleView); tc.addView(st);
+        LinearLayout.LayoutParams tlp = Ui.weight1();
+        tlp.setMargins(dp(4), 0, 0, 0);
+        bar.addView(tc, tlp);
 
-        TextView reload = new TextView(this);
-        reload.setText("⟳"); reload.setTextSize(22); reload.setTextColor(col(R.color.fg));
-        reload.setPadding(dp(12), 0, dp(10), 0);
+        ImageView reload = ui.iconButton(R.drawable.ic_refresh, ui.onSurfaceVariant);
+        reload.setContentDescription("Reload");
         reload.setOnClickListener(v -> { errView.setVisibility(View.GONE); web.reload(); });
         bar.addView(reload);
         root.addView(bar);
@@ -96,23 +103,28 @@ public class HostActivity extends Activity {
         web = new WebView(this);
         fl.addView(web);
 
-        LinearLayout err = new LinearLayout(this);
-        err.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout err = ui.vcol();
         err.setGravity(Gravity.CENTER);
-        err.setPadding(dp(30), 0, dp(30), 0);
-        err.setBackgroundColor(col(R.color.bg));
-        TextView eh = new TextView(this); eh.setText("Can't reach host");
-        eh.setTextSize(18); eh.setTextColor(col(R.color.fg));
-        eh.setTypeface(Typeface.DEFAULT, Typeface.BOLD); eh.setGravity(Gravity.CENTER);
-        errDetail = new TextView(this); errDetail.setTextSize(13);
-        errDetail.setTextColor(col(R.color.dim)); errDetail.setGravity(Gravity.CENTER);
-        errDetail.setPadding(0, dp(8), 0, dp(16));
-        Button retry = new Button(this); retry.setText("Retry");
-        GradientDrawable g = new GradientDrawable();
-        g.setColor(col(R.color.accent)); g.setCornerRadius(dp(9));
-        retry.setBackground(g); retry.setTextColor(col(R.color.bg));
+        err.setPadding(dp(32), 0, dp(32), 0);
+        err.setBackgroundColor(ui.surface);
+        ImageView eic = ui.icon(R.drawable.ic_shield, ui.err, 48);
+        err.addView(eic);
+        TextView eh = ui.text("Can't reach host", 22, ui.onSurface, false);
+        eh.setGravity(Gravity.CENTER);
+        eh.setPadding(0, dp(16), 0, 0);
+        errDetail = ui.text("", 14, ui.onSurfaceVariant, false);
+        errDetail.setGravity(Gravity.CENTER);
+        errDetail.setPadding(0, dp(8), 0, dp(4));
+        TextView hint = ui.text("Check that Tailscale is connected and the S-remote server is running.",
+                13, ui.onSurfaceVariant, false);
+        hint.setGravity(Gravity.CENTER);
+        hint.setPadding(0, 0, 0, dp(20));
+        TextView retry = ui.filledButton("Retry");
         retry.setOnClickListener(v -> { errView.setVisibility(View.GONE); web.loadUrl(url); });
-        err.addView(eh); err.addView(errDetail); err.addView(retry);
+        TextView ts = ui.textButton("Open Tailscale");
+        ts.setOnClickListener(v -> { if (!Tailscale.openApp(this)) Tailscale.openPlayStore(this); });
+        err.addView(eh); err.addView(errDetail); err.addView(hint); err.addView(retry);
+        err.addView(ts, ui.margins(0, 8, 0, 0));
         errView = err;
         errView.setVisibility(View.GONE);
         fl.addView(errView);
@@ -345,9 +357,64 @@ public class HostActivity extends Activity {
         String u = i.getStringExtra(EXTRA_URL);
         if (u != null && !u.equals(url)) {
             url = u; name = i.getStringExtra(EXTRA_NAME);
+            hostId = i.getStringExtra(EXTRA_HOST_ID);
+            StateBus.foregroundHost = hostId;
+            titleView.setText(name);
+            renderStatus();
             errView.setVisibility(View.GONE);
             web.loadUrl(url);
         }
+    }
+
+    // ---------- lifecycle: app lock, notification suppression, live status ----------
+    @Override protected void onStart() { super.onStart(); LockGate.onStart(); }
+    @Override protected void onStop() { LockGate.onStop(); super.onStop(); }
+
+    @Override protected void onResume() {
+        super.onResume();
+        LockGate.check(this);
+        StateBus.foregroundHost = hostId;
+        StateBus.listen(onState);
+        renderStatus();
+        // the user is looking at this host now — clear its pending alerts
+        if (hostId != null) for (StateBus.Sess s : StateBus.sessions(hostId)) {
+            Host h = new Host(hostId, name, url, true);
+            Notify.cancel(this, h, "q:" + s.id);
+            Notify.cancel(this, h, "d:" + s.id);
+        }
+    }
+
+    @Override protected void onPause() {
+        if (hostId != null && hostId.equals(StateBus.foregroundHost)) StateBus.foregroundHost = null;
+        StateBus.unlisten(onState);
+        super.onPause();
+    }
+
+    /** toolbar subtitle: connection + session states from the monitor, else the address */
+    private void renderStatus() {
+        String addr = url.replaceFirst("^[a-z]+://", "");
+        Boolean up = hostId == null ? null : StateBus.isConnected(hostId);
+        int run = 0, ask = 0, n = 0;
+        if (hostId != null) for (StateBus.Sess s : StateBus.sessions(hostId)) {
+            if (s.state == Detector.State.EXITED) continue;
+            n++;
+            if (s.state == Detector.State.RUNNING) run++;
+            else if (s.state == Detector.State.QUESTION) ask++;
+        }
+        int dot;
+        String txt;
+        if (up == null) { dot = ui.outline; txt = addr; }
+        else if (!up) { dot = ui.err; txt = "Reconnecting · " + addr; }
+        else {
+            dot = ask > 0 ? ui.warn : run > 0 ? ui.primary : ui.ok;
+            StringBuilder b = new StringBuilder();
+            if (ask > 0) b.append(ask).append(" need").append(ask == 1 ? "s" : "").append(" input");
+            if (run > 0) b.append(b.length() > 0 ? " · " : "").append(run).append(" running");
+            if (b.length() == 0) b.append(n == 0 ? "Connected" : n + " session" + (n > 1 ? "s" : "") + " idle");
+            txt = b.toString();
+        }
+        statusDot.setBackground(ui.oval(dot));
+        statusView.setText(txt);
     }
 
     @Override public void onBackPressed() {

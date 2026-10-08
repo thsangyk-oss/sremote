@@ -63,4 +63,13 @@ public class HostStore {
 
     public boolean monitorEnabled() { return sp.getBoolean(KEY_MONITOR, false); }
     public void setMonitorEnabled(boolean v) { sp.edit().putBoolean(KEY_MONITOR, v).apply(); }
+
+    // per-kind notification toggles + app lock
+    public static final String N_QUESTION = "n_question", N_DONE = "n_done", N_SESSION = "n_session";
+    private static final String KEY_LOCK = "lock_enabled";
+
+    public boolean notifyKind(String key) { return sp.getBoolean(key, true); }
+    public void setNotifyKind(String key, boolean v) { sp.edit().putBoolean(key, v).apply(); }
+    public boolean lockEnabled() { return sp.getBoolean(KEY_LOCK, false); }
+    public void setLockEnabled(boolean v) { sp.edit().putBoolean(KEY_LOCK, v).apply(); }
 }
