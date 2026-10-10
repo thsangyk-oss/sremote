@@ -193,6 +193,7 @@ function enterWorkspace(wsId) {
   $("#ws-title").innerHTML = w
     ? `<span class="wt-name">${folderSvg(16)} ${esc(w.name)}</span><span class="wt-path">${esc(w.path)}</span>`
     : `<span class="wt-name">Standalone</span><span class="wt-path">no workspace</span>`;
+  setTitle();
   showView("work");
   if (mqNarrow.matches) { sideVisible = false; fpVisible = false; applyToggles(); } // drawers start closed on narrow screens
   fpRoot = w ? `ws:${w.id}` : null;
@@ -211,6 +212,7 @@ function goHome() {
   splitId = null; splitFocus = "left";
   termsEl.classList.remove("split");
   for (const p of panes.values()) p.el.classList.add("hidden");
+  setTitle();
   showView("home");
 }
 $("#home-btn").onclick = goHome;
@@ -632,6 +634,7 @@ function updateEmpty() {
 async function loadWorkspaces() {
   workspaces = await fetch("/api/workspaces").then((r) => r.json()).catch(() => []);
   renderAll();
+  setTitle();
 }
 
 // ---------- sidebar / files panel toggles ----------
@@ -914,6 +917,10 @@ snipModal.onclick = (e) => e.target === snipModal && snipModal.classList.add("hi
 // ---------- notifications (bell / idle) ----------
 const notifiedSess = new Set(); // sessions with an unread notification (drives .tab.bell)
 const BASE_TITLE = document.title;
+const titleFor = () => view === "work"
+  ? `${(currentWs && wsById(currentWs) ? wsById(currentWs).name : "Standalone")} — ${BASE_TITLE}`
+  : BASE_TITLE;
+const setTitle = () => { document.title = (notifiedSess.size ? "● " : "") + titleFor(); };
 let notifAsked = false;
 function reqNotifPerm() { // one-time, lazily from a user gesture
   if (notifAsked || !("Notification" in window) || Notification.permission !== "default") return;
@@ -935,7 +942,7 @@ function notifySession(id, reason) {
   notifiedSess.add(id);
   const t = tabsEl.querySelector(`[data-id="${id}"]`);
   if (t) t.classList.add("bell");
-  document.title = "● S-remote";
+  setTitle();
   const sess = sessions.find((s) => s.id === id);
   const body = reason === "bell" ? "Process signaled attention" : "Session idle after output";
   const visible = document.visibilityState === "visible";
@@ -953,10 +960,10 @@ function clearNotify(id) {
   notifiedSess.delete(id);
   const t = tabsEl.querySelector(`[data-id="${id}"]`);
   if (t) t.classList.remove("bell");
-  if (!notifiedSess.size) document.title = BASE_TITLE;
+  setTitle();
 }
-document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") document.title = BASE_TITLE; });
-window.addEventListener("focus", () => { document.title = BASE_TITLE; });
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") document.title = titleFor(); });
+window.addEventListener("focus", () => { document.title = titleFor(); });
 setInterval(() => { // idle detect: produced output then quiet ≥15s → notify once per busy→quiet edge
   const now = Date.now();
   for (const [id, p] of panes) {
