@@ -1,4 +1,4 @@
-# S-remote installer / updater for Windows
+﻿# S-remote installer / updater for Windows
 #   irm https://raw.githubusercontent.com/thsangyk-oss/sremote/main/install.ps1 | iex
 # Options (env): $env:SREMOTE_DIR to choose install dir
 $ErrorActionPreference = 'Stop'
@@ -8,46 +8,144 @@ $repo     = 'thsangyk-oss/sremote'
 $taskName = 'S-remote'
 $nodeVer  = 'v22.11.0'   # fallback portable Node LTS - only fetched when no node >=18 found
 
-# ---------- 0. locate existing install -----------------------------------------
-function Find-InstallDir {
-    if ($env:SREMOTE_DIR) { return $env:SREMOTE_DIR }
-    # running server self-reports its root (api/info.root on newer releases)
-    try { $r = Invoke-RestMethod 'http://localhost:2209/api/info' -TimeoutSec 2
-          if ($r.root -and (Test-Path (Join-Path $r.root 'server.js'))) { return $r.root } } catch {}
-    # scheduled task action points at start.bat / start.cmd inside the install dir
-    try { $t = Get-ScheduledTask -TaskName 'S-remote' -ErrorAction Stop
-          $exe = ($t.Actions[0].Execute -replace '"','')
-          $d = Split-Path $exe -Parent
-          if ($d -and (Test-Path (Join-Path $d 'server.js'))) { return $d } } catch {}
-    # a node process launched with an absolute server.js path
-    Get-CimInstance Win32_Process -Filter "name='node.exe'" -ErrorAction SilentlyContinue |
-        ForEach-Object {
-            if ($_.CommandLine -match '([A-Za-z]:[\\/][^"'']*server\.js)') {
-                $d = Split-Path $Matches[1] -Parent
-                if (Test-Path (Join-Path $d 'server.js')) { return $d }
-            }
-        }
-    # autostart Run key points at tray exe / start.cmd inside the install dir
-    foreach ($rk in 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run',
-                    'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run') {
-        try { $v = (Get-ItemProperty $rk -Name 'S-remote' -ErrorAction Stop).'S-remote'
-              $exe = ($v -replace '"','')
-              $d = Split-Path $exe -Parent
-              if ($d -and (Test-Path (Join-Path $d 'server.js'))) { return $d }
-              $d2 = Split-Path (Split-Path $d -Parent) -Parent   # exe may live in agent\tray
-              if ($d2 -and (Test-Path (Join-Path $d2 'server.js'))) { return $d2 } } catch {}
-    }
-    # custom install dirs: probe drive roots for sremote-ish folders
-    foreach ($drv in (Get-PSDrive -PSProvider FileSystem)) {
-        foreach ($name in 'S-remote','Sremote','sremote') {
-            $d = Join-Path $drv.Root $name
-            if (Test-Path (Join-Path $d 'server.js')) { return $d } } }
-    # well-known spots
-    foreach ($d in @("$env:LOCALAPPDATA\S-remote", "$env:USERPROFILE\S-remote")) {
-        if (Test-Path (Join-Path $d 'server.js')) { return $d } }
-    return (Join-Path $env:LOCALAPPDATA 'S-remote')   # fresh default
+# ---------- 0. locate install dir(s) -------------------------------------------
+# Older installers could miss the real install dir and drop a fresh copy into
+# %LOCALAPPDATA% — hiding workspaces (state.json) and live sessions (broker).
+# Instead of returning the first match we collect EVERY dir that looks like an
+# install; if several exist we ask the user: fresh install, or fix + install
+# into the original dir (re-attaches sessions, merges state, removes dupes).
+$script:runningRoot    = $null   # dir the :2209 server reports (api/info.root)
+$script:liveBrokerDir  = $null   # dir whose session-host.js broker is alive
+$candSet = [ordered]@{}
+
+function Add-InstallCandidate([string]$d) {
+    if (-not $d) { return }
+    if (-not (Test-Path (Join-Path $d 'server.js'))) { return }
+    $p = [IO.Path]::GetFullPath($d).TrimEnd('\')
+    if (-not $candSet.Contains($p)) { $candSet[$p] = $true }
 }
-$dir = Find-InstallDir
+function Get-WsCount($d) {
+    try { return @((Get-Content (Join-Path $d 'state.json') -Raw -ErrorAction Stop | ConvertFrom-Json).workspaces).Count }
+    catch { return 0 }
+}
+function Get-DirInfo($d) {
+    $bits = @()
+    if ($script:liveBrokerDir -eq $d) { $bits += 'live sessions' }
+    if ($script:runningRoot -eq $d)   { $bits += 'running now' }
+    $bits += "$(Get-WsCount $d) workspace(s)"
+    return ($bits -join ', ')
+}
+
+# a) running server self-reports its root (api/info.root on v1.2.1+)
+try { $r = Invoke-RestMethod 'http://localhost:2209/api/info' -TimeoutSec 2
+      if ($r.root) { $script:runningRoot = [IO.Path]::GetFullPath($r.root).TrimEnd('\'); Add-InstallCandidate $r.root } } catch {}
+
+# b) port owner fallback for servers too old to report root: the :2209 listener's
+#    node.exe under <dir>\node reveals a portable install
+try { Get-NetTCPConnection -LocalPort 2209 -State Listen -ErrorAction Stop |
+      Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object {
+        $pe = (Get-CimInstance Win32_Process -Filter "ProcessId=$($_)" -ErrorAction SilentlyContinue).ExecutablePath
+        if ($pe -match '([A-Za-z]:[\\/][^"'']*)[\\/]node[\\/]node\.exe') { Add-InstallCandidate $Matches[1] }
+      } } catch {}
+
+# c) node processes: absolute server.js paths, live session broker, tray parent
+foreach ($p in (Get-CimInstance Win32_Process -Filter "name='node.exe'" -ErrorAction SilentlyContinue)) {
+    if ($p.CommandLine -match '([A-Za-z]:[\\/][^"'']*)[\\/]agent[\\/]session-host\.js') {
+        Add-InstallCandidate $Matches[1]
+        $script:liveBrokerDir = [IO.Path]::GetFullPath($Matches[1]).TrimEnd('\')
+    }
+    if ($p.CommandLine -match '([A-Za-z]:[\\/][^"'']*server\.js)') {
+        Add-InstallCandidate (Split-Path $Matches[1] -Parent)
+    }
+    # "node server.js" (relative) hides its dir — its parent is the tray exe,
+    # whose absolute path sits at <dir>\agent\tray\SremoteTray.exe
+    if ($p.ParentProcessId) {
+        $par = Get-CimInstance Win32_Process -Filter "ProcessId=$($p.ParentProcessId)" -ErrorAction SilentlyContinue
+        if ($par -and $par.ExecutablePath -match '([A-Za-z]:[\\/][^"'']*)[\\/]agent[\\/]tray[\\/]SremoteTray\.exe') { Add-InstallCandidate $Matches[1] }
+        if ($par -and $par.CommandLine     -match '([A-Za-z]:[\\/][^"'']*)[\\/](start\.cmd|start\.bat)')      { Add-InstallCandidate $Matches[1] }
+    }
+}
+Get-CimInstance Win32_Process -Filter "name='SremoteTray.exe'" -ErrorAction SilentlyContinue | ForEach-Object {
+    if ($_.ExecutablePath -match '([A-Za-z]:[\\/][^"'']*)[\\/]agent[\\/]tray[\\/]SremoteTray\.exe') { Add-InstallCandidate $Matches[1] }
+}
+
+# d) scheduled task action -> start.cmd in root, or tray exe two levels down
+try { $t = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+      $exe = ($t.Actions[0].Execute -replace '"','')
+      $d = Split-Path $exe -Parent
+      Add-InstallCandidate $d                                            # <dir>\start.cmd
+      Add-InstallCandidate (Split-Path (Split-Path $d -Parent) -Parent)  # <dir>\agent\tray\*.exe
+} catch {}
+
+# e) autostart Run keys -> same shapes as the scheduled task
+foreach ($rk in 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run',
+                'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run') {
+    try { $v = (Get-ItemProperty $rk -Name 'S-remote' -ErrorAction Stop).'S-remote'
+          $d = Split-Path ($v.Trim('"')) -Parent
+          Add-InstallCandidate $d
+          Add-InstallCandidate (Split-Path (Split-Path $d -Parent) -Parent) } catch {}
+}
+
+# f) every top-level dir on every drive, plus one "sremote"-named level deeper
+#    (covers C:\sremote, D:\tools\sremote, X:\myserver, ...)
+foreach ($drv in (Get-PSDrive -PSProvider FileSystem)) {
+    Get-ChildItem $drv.Root -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
+        Add-InstallCandidate $_.FullName
+        foreach ($n in 'S-remote','Sremote','sremote') { Add-InstallCandidate (Join-Path $_.FullName $n) }
+    }
+}
+
+# g) well-known spots
+foreach ($d in @("$env:LOCALAPPDATA\S-remote", "$env:USERPROFILE\S-remote", "$env:USERPROFILE\sremote",
+                 "$env:USERPROFILE\Desktop\S-remote", "$env:USERPROFILE\Documents\S-remote", "$env:ProgramData\S-remote")) {
+    Add-InstallCandidate $d
+}
+
+$cands    = @($candSet.Keys)
+$dir      = $null
+$fixDupes = @()
+
+if ($env:SREMOTE_DIR) {
+    $dir = [IO.Path]::GetFullPath($env:SREMOTE_DIR).TrimEnd('\')
+} elseif ($cands.Count -eq 0) {
+    $dir = Join-Path $env:LOCALAPPDATA 'S-remote'   # fresh default
+} elseif ($cands.Count -eq 1) {
+    $dir = $cands[0]
+} else {
+    # original = live broker > most workspaces > currently running > first
+    $primary = $null
+    if ($liveBrokerDir -and ($cands -contains $liveBrokerDir)) { $primary = $liveBrokerDir }
+    if (-not $primary) {
+        $primary = $cands | Sort-Object -Descending `
+            @{ e = { Get-WsCount $_ } }, @{ e = { $_ -eq $script:runningRoot } } |
+            Select-Object -First 1
+    }
+    # "fresh" choice = the dir the (duplicate) server is running from now
+    $freshDir = if ($script:runningRoot -and ($cands -contains $script:runningRoot) -and $script:runningRoot -ne $primary) { $script:runningRoot }
+                else { ($cands | Where-Object { $_ -ne $primary } | Select-Object -First 1) }
+    if (-not $freshDir) { $freshDir = $primary }
+
+    Write-Host ""
+    Write-Host "    !! multiple S-remote installs detected:"
+    foreach ($d in $cands) { Write-Host ("       - {0}  ({1})" -f $d, (Get-DirInfo $d)) }
+    Write-Host ""
+    Write-Host "    [1] Fresh install into $freshDir"
+    Write-Host "        (other installs stay on disk untouched; their workspaces are NOT migrated)"
+    Write-Host "    [2] FIX bad update + install into $primary"
+    Write-Host "        (keeps workspaces, re-attaches live sessions, then removes duplicate dirs)"
+    $choice = $env:SREMOTE_MODE
+    if (-not $choice) { try { $choice = Read-Host "    Choice [1/2, default 2]" } catch { $choice = '2' } }
+    if ($choice -eq '1' -or $choice -match '^(fresh|new)$') { $dir = $freshDir }
+    else { $dir = $primary; $fixDupes = @($cands | Where-Object { $_ -ne $primary }) }
+}
+
+if ($env:SREMOTE_PROBE_ONLY) {
+    Write-Host "==> probe only"
+    foreach ($d in $cands) { Write-Host ("    cand: {0}  ({1})" -f $d, (Get-DirInfo $d)) }
+    Write-Host "    chosen dir: $dir"
+    Write-Host "    fixDupes:   $($fixDupes -join '; ')"
+    return
+}
 
 Write-Host "==> S-remote installer"
 Write-Host "    dir: $dir"
@@ -84,6 +182,25 @@ if ($update) {
     foreach ($f in 'state.json','data') {
         $p = Join-Path $dir $f
         if (Test-Path $p) { Copy-Item $p "$p.install-bak" -Recurse -Force -ErrorAction SilentlyContinue } }
+}
+
+# fix mode: merge state from a duplicate dir if it accumulated MORE workspaces
+# than the original while it was active (e.g. user kept working on the dupe)
+foreach ($dupe in $fixDupes) {
+    $ds = Join-Path $dupe 'state.json'
+    if (-not (Test-Path $ds)) { continue }
+    $dn = Get-WsCount $dupe
+    $ms = Join-Path $dir 'state.json'
+    $mn = Get-WsCount $dir
+    # always keep a copy of the dupe's state inside the original dir for manual recovery
+    Copy-Item $ds "$dir\state.json.dupe-bak" -Force -ErrorAction SilentlyContinue
+    if (Test-Path "$dupe\data") { Copy-Item "$dupe\data" "$dir\data.dupe-bak" -Recurse -Force -ErrorAction SilentlyContinue }
+    if ($dn -gt $mn) {
+        if (Test-Path $ms) { Copy-Item $ms "$ms.pre-merge-bak" -Force -ErrorAction SilentlyContinue }
+        Copy-Item $ds $ms -Force
+        if (Test-Path "$dupe\data") { Copy-Item "$dupe\data" "$dir\data" -Recurse -Force -ErrorAction SilentlyContinue }
+        Write-Host "    merged newer state ($dn workspaces) from $dupe"
+    }
 }
 
 $relTag = ""
@@ -181,6 +298,22 @@ try {
     Write-Host ""
     Write-Host "OK - S-remote $(if($update){'updated'}else{'installed'}) (server starting...)"
 }
+# ---------- 6. remove duplicate install dirs (fix mode) -------------------------
+# the new server is already up in $dir — kill anything still running out of the
+# duplicate dir (tray, stray node) so its files unlock, then delete the dir
+foreach ($dupe in $fixDupes) {
+    if ([IO.Path]::GetFullPath($dupe) -eq [IO.Path]::GetFullPath($dir)) { continue }
+    Write-Host "    removing duplicate install: $dupe"
+    $esc = [regex]::Escape($dupe.TrimEnd('\'))
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object { ($_.CommandLine -match "$esc[\\/]") -or ($_.ExecutablePath -match "$esc[\\/]") } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Seconds 1
+    try { Remove-Item $dupe -Recurse -Force -ErrorAction Stop
+          Write-Host "    removed $dupe" }
+    catch { Write-Host "    WARN: could not fully remove $dupe - delete it manually after a reboot" }
+}
+
 if ($relTag) { Write-Host "    Install complete — version $relTag" }
 Write-Host "    Local:     http://localhost:2209"
 Write-Host "    Tailscale: http://<this-machine-tailscale-ip>:2209"

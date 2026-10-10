@@ -17,15 +17,28 @@ One command in PowerShell — installs or updates in place, keeping
 irm https://raw.githubusercontent.com/thsangyk-oss/sremote/main/install.ps1 | iex
 ```
 
-The script auto-detects an existing install (running server, scheduled
-task, well-known dirs), downloads `sremote-server.zip` from the latest
+The script scans for **every** existing install (running server, live
+session broker, scheduled task, Run keys, drive scan, well-known dirs),
+downloads `sremote-server.zip` from the latest
 [release](https://github.com/thsangyk-oss/sremote/releases), installs
 Node.js portable if missing, runs `npm install --omit=dev`, registers a
 `S-remote` scheduled task for autostart, and starts the server.
 Install dir defaults to `%LOCALAPPDATA%\S-remote` — override with
-`$env:SREMOTE_DIR`, skip the overwrite prompt with `$env:SREMOTE_YES=1`.
+`$env:SREMOTE_DIR`, skip the overwrite prompt with `$env:SREMOTE_YES=1`,
+preview detection only with `$env:SREMOTE_PROBE_ONLY=1`.
 
-**Workspaces gone after updating to v1.7.3 or older?** Those installers
+**Several installs found?** If the scan detects more than one S-remote
+dir (e.g. a bad update dropped a copy into `%LOCALAPPDATA%`), it asks:
+
+- `[1]` fresh install into the currently-running dir — others stay
+  untouched, their workspaces are **not** migrated
+- `[2]` fix + install into the original dir — keeps workspaces,
+  re-attaches live sessions, merges newer state from the duplicate,
+  then removes the duplicate dirs *(default)*
+
+Pre-answer non-interactively with `$env:SREMOTE_MODE = 'fresh'` or `'fix'`.
+
+**Workspaces gone after updating to v1.10.x or older?** Those installers
 could miss a custom install dir (e.g. `C:\sremote`) and do a fresh
 install under `%LOCALAPPDATA%` — your old install (workspaces + live
 sessions) is still on disk. Run this to update the original dir in

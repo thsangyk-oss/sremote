@@ -1,4 +1,4 @@
-# S-remote state recovery
+﻿# S-remote state recovery
 #   irm https://raw.githubusercontent.com/thsangyk-oss/sremote/main/fix-state.ps1 | iex
 # Repairs machines where an old installer missed the original install dir
 # (e.g. C:\sremote) and did a fresh install into %LOCALAPPDATA% — wiping the
