@@ -1,4 +1,4 @@
-﻿# S-remote state recovery
+# S-remote state recovery
 #   irm https://raw.githubusercontent.com/thsangyk-oss/sremote/main/fix-state.ps1 | iex
 # Repairs machines where an old installer missed the original install dir
 # (e.g. C:\sremote) and did a fresh install into %LOCALAPPDATA% - wiping the
@@ -125,7 +125,7 @@ if ([IO.Path]::GetFullPath($cur) -ne [IO.Path]::GetFullPath($target) -and (Test-
     Write-Host ""
     Write-Host "==> stopping duplicate install at $cur"
     # a Windows service whose binary lives inside the dupe dir would keep
-    # respawning its server â€” stop + un-register (the installer's re-run
+    # respawning its server -- stop + un-register (the installer's re-run
     # against $target registers a fresh one there)
     try {
         $qc = (sc.exe qc SremoteService 2>$null | Out-String)
