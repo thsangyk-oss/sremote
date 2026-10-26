@@ -106,10 +106,20 @@ function bcast(o) {
   for (const c of conns) try { c.write(l); } catch {}
 }
 
+// node-pty reports a bad cwd (win error 267) asynchronously from a worker,
+// which try/catch can't see and which kills the whole host — so only ever
+// hand it an absolute directory that exists right now
+function safeCwd(cwd) {
+  try {
+    if (cwd && path.isAbsolute(cwd) && fs.statSync(cwd).isDirectory()) return cwd;
+  } catch {}
+  return os.homedir();
+}
+
 function spawnProc(s) {
   const sh = SHELLS[s.shell] || SHELLS.powershell || Object.values(SHELLS)[0];
   s.proc = pty.spawn(sh.path, sh.args, {
-    name: "xterm-256color", cols: s.cols || 120, rows: s.rows || 32, cwd: s.cwd,
+    name: "xterm-256color", cols: s.cols || 120, rows: s.rows || 32, cwd: safeCwd(s.cwd),
     env: cleanEnv(),
   });
   s.exited = false;
@@ -242,6 +252,8 @@ setInterval(() => {
     s.sbDirty = false;
   }
 }, 3000);
+// one bad pty must not take every other terminal down with it
+process.on("uncaughtException", (e) => { log("uncaught:", e && e.message); });
 for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   process.on(sig, () => { flush(); process.exit(0); });
 }

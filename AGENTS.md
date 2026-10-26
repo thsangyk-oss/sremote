@@ -26,7 +26,7 @@ Read `ARCHITECTURE.md` first — full map of server/UI/protocol/state so you don
 cd android && build-apk.bat
 ```
 (sets JAVA_HOME=`%USERPROFILE%\android-dev\tools\jdk-17.0.20.1+1`, ANDROID_HOME=`%USERPROFILE%\android-dev\sdk`, runs gradle 8.9 `assembleRelease assembleDebug`).
-Installed on both dev machines (`C:\Users\User`, `C:\Users\ADMIN`); only `User` has the release keystore. `ADMIN` also has an emulator (AVD `sremote34`, API 34 x86_64) for smoke tests.
+Installed on both dev machines (`C:\Users\User`, `C:\Users\Administrator` — migrated from the old `ADMIN` account); only `User` has the release keystore. `Administrator` also has an emulator (AVD `sremote34`, API 34 x86_64) for smoke tests.
 Outputs: `android/app/build/outputs/apk/{release/app-release.apk,debug/app-debug.apk}`.
 Release signing via `android/keystore.properties` (never print/commit secrets). Verify:
 `%USERPROFILE%\android-dev\sdk\build-tools\<ver>\apksigner.bat verify --print-certs app-release.apk` → `CN=S-remote`.
