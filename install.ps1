@@ -285,14 +285,32 @@ try {
 
 # ---------- 4. tray app + start.cmd + autostart task ---------------------------
 # compile the tray host (winexe -> no console window ever, icon + start/stop)
+# stop the exes' owners BEFORE compiling: a running tray locks SremoteTray.exe
+# and a running service locks SremoteService.exe - csc then fails CS0016 while
+# the stale binary stays, silently leaving old code in place (this actually
+# broke a machine: Oct tray had no user-agent -> all terminals ran as SYSTEM)
+try { sc.exe query SremoteService >$null 2>&1; if ($LASTEXITCODE -eq 0) { sc.exe stop SremoteService >$null 2>&1; Start-Sleep -Milliseconds 800 } } catch {}
+Get-Process SremoteTray -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+function Build-Exe($src, $out, $target, $refs) {
+    if (-not (Test-Path $src)) { return $false }
+    $r = & $csc.FullName /nologo "/target:$target" "/out:$out" $refs $src 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        # exe still locked (e.g. running in another session) - rename it away and retry once
+        Rename-Item $out "$out.old" -Force -ErrorAction SilentlyContinue
+        $r = & $csc.FullName /nologo "/target:$target" "/out:$out" $refs $src 2>&1
+    }
+    if ($LASTEXITCODE -eq 0 -and (Test-Path $out)) { Write-Host "    compiled: $out"; return $true }
+    Write-Host "    WARN: compile failed for $out"; $r | Select-Object -First 5 | ForEach-Object { Write-Host "      $_" }
+    return $false
+}
 $traySrc = Join-Path $dir 'agent\tray\SremoteTray.cs'
 $trayExe = Join-Path $dir 'agent\tray\SremoteTray.exe'
 $csc = Get-ChildItem "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe" -ErrorAction SilentlyContinue
 if (-not $csc) { $csc = Get-ChildItem "$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\csc.exe" -ErrorAction SilentlyContinue }
-if ($csc -and (Test-Path $traySrc)) {
-    & $csc.FullName /nologo /target:winexe "/out:$trayExe" /r:System.Drawing.dll /r:System.Windows.Forms.dll $traySrc | Out-Null
-    if (Test-Path $trayExe) { Write-Host "    tray app compiled: $trayExe" }
-    else { Write-Host "    WARN: tray compile failed (console start.cmd will be used)" }
+if ($csc) {
+    if (-not (Build-Exe $traySrc $trayExe 'winexe' @('/r:System.Drawing.dll','/r:System.Windows.Forms.dll'))) {
+        Write-Host "         (console start.cmd will be used)"
+    }
 }
 
 # ---------- 4b. SYSTEM service (AnyDesk-style broker) --------------------------
@@ -301,10 +319,8 @@ if ($csc -and (Test-Path $traySrc)) {
 # screen inside that session (a Session-0 service can't touch the desktop)
 $svcSrc = Join-Path $dir 'agent\service\SremoteService.cs'
 $svcExe = Join-Path $dir 'agent\service\SremoteService.exe'
-if ($csc -and (Test-Path $svcSrc)) {
-    & $csc.FullName /nologo /target:exe "/out:$svcExe" /r:System.ServiceProcess.dll $svcSrc | Out-Null
-    if (Test-Path $svcExe) { Write-Host "    service compiled: $svcExe" }
-    else { Write-Host "    WARN: service compile failed (logon task will start the server instead)" }
+if ($csc -and -not (Build-Exe $svcSrc $svcExe 'exe' @('/r:System.ServiceProcess.dll'))) {
+    Write-Host "         (logon task will start the server instead)"
 }
 $svcOk = $false
 if (Test-Path $svcExe) {
