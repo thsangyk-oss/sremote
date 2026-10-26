@@ -1,4 +1,4 @@
-﻿# S-remote installer / updater for Windows
+# S-remote installer / updater for Windows
 #   irm https://raw.githubusercontent.com/thsangyk-oss/sremote/main/install.ps1 | iex
 # Options (env): $env:SREMOTE_DIR to choose install dir
 $ErrorActionPreference = 'Stop'
