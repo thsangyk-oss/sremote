@@ -148,7 +148,21 @@ The installer downloads `sremote-server.zip` from the latest [release](https://g
   ```
 </details>
 
-### Linux / macOS / from source
+### Linux (one command, headless)
+
+Terminals, files, git, dev ports — everything except remote screen (Windows-only). Installs, or updates in place keeping your projects and sessions:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/thsangyk-oss/sremote/main/install.sh | sudo bash
+```
+
+- With sudo: installs to `/opt/sremote` as a systemd service running as **you** (`$SUDO_USER`; override with `SREMOTE_USER=name`). Without sudo (`| bash`): `~/.local/share/sremote` + a `systemctl --user` service.
+- Uses Node 18+ from `PATH`, else downloads portable Node 22 into the install dir. Build tools for `node-pty` are installed only if no prebuilt binary fits.
+- `KillMode=process` — restarts/updates keep the session broker, so shells survive.
+- Options: `SREMOTE_DIR`, `SREMOTE_PORT`, `SREMOTE_REF` (branch/tag). Logs: `journalctl -u sremote`. Uninstall: `curl -fsSL …/install.sh | sudo bash -s -- --uninstall`.
+- Tailscale must be up on the host (`curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up`) — only localhost and tailnet clients are accepted.
+
+### macOS / from source
 
 ```bash
 git clone https://github.com/thsangyk-oss/sremote && cd sremote

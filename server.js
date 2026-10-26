@@ -469,7 +469,9 @@ DELETE ${base}/api/sessions/<id>                  kill
 `;
 }
 
-function createSession({ shell = "powershell", cwd, cols = 120, rows = 32, workspace, name }) {
+function createSession({ shell, cwd, cols = 120, rows = 32, workspace, name }) {
+  // clients may remember a shell from another host (powershell on a linux box)
+  if (!SHELLS[shell]) shell = SHELLS.powershell ? "powershell" : SHELLS.bash ? "bash" : Object.keys(SHELLS)[0];
   // service mode: no host and no user session to bring one up — the caller
   // should show this; pre-login a SYSTEM host may exist and is usable
   if (IS_SERVICE && !hostSock && !primaryAgent()) return null;
@@ -697,6 +699,12 @@ function extractArchive(archive, destDir) {
       { timeout: 600000, stdio: ["ignore", "pipe", "pipe"] });
     void r; return;
   } catch (e) { if (!/\.zip$/i.test(archive)) throw new Error("extract failed (tar): " + (e.stderr || e.message)); }
+  if (!IS_WIN) {   // GNU tar can't read .zip
+    try {
+      execFileSync("unzip", ["-o", "-q", archive, "-d", destDir], { timeout: 600000, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (e) { throw new Error("extract failed (unzip): " + (e.code === "ENOENT" ? "install unzip" : (e.stderr || e.message))); }
+    return;
+  }
   execFileSync("powershell", ["-NoProfile", "-Command",
     `Expand-Archive -LiteralPath ${psq(archive)} -DestinationPath ${psq(destDir)} -Force`],
     { timeout: 600000, stdio: ["ignore", "pipe", "pipe"] });

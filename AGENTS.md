@@ -6,6 +6,7 @@ Read `ARCHITECTURE.md` first — full map of server/UI/protocol/state so you don
 - `server.js` (Node, port 2209) + `agent/` (session broker, screen agents, tray, service) + `public/` (web UI, static, served from disk).
 - `android/` — native Android client (Java, no AndroidX). Plan for the 2.0 redesign: `android/PLAN-v2.md`.
 - `install.ps1` / `fix-state.ps1` / `elevate.ps1` — Windows installer + recovery, bootstrapped via `irm <raw-url> | iex`. Keep them **pure ASCII, no BOM**: PS 5.1 `iex` doesn't skip U+FEFF so a BOM turns the first `#` line into a "command" (and keep them ASCII-only anyway so `-File` never needs BOM either).
+- `install.sh` — Linux installer (headless: terminals only, systemd, `curl | sudo bash`). Keep it LF (`.gitattributes`).
 
 ## Service architecture (AnyDesk-style)
 - `agent/service/SremoteService.cs` → `SremoteService.exe` — real Windows service (name `SremoteService` = exe filename; sc.exe auto-start + `sc failure` restart actions). Spawns `node server.js` as **SYSTEM** with `SREMOTE_SERVICE=1`, watchdog respawns it, stdout → `data/service.log` (auto-trimmed >1 MB). Extra env overrides: `data/service.env` (`KEY=VALUE` lines, e.g. `SREMOTE_PORT`, `SREMOTE_AGENT_PORT`).
@@ -37,5 +38,5 @@ Detector unit test (no Android needed): compile `Detector.java` + a test `main` 
 - GitHub token: from git credential manager (`printf 'protocol=https\nhost=github.com\n\n' | git credential fill`) — never echo it.
 - Release body JSON must be written as UTF-8 by node (curl on Windows mangles non-ASCII), then `POST /repos/thsangyk-oss/sremote/releases`, upload assets to `uploads.github.com/.../assets?name=...`.
 - Every release MUST include `sremote-server.zip` (installer downloads `releases/latest/download/sremote-server.zip`). Build it with
-  `git archive HEAD server.js package.json package-lock.json install.ps1 install.bat start.bat start.cmd fix-state.ps1 README.md ARCHITECTURE.md public agent -o temp-upload/sremote-server.zip`
+  `git archive HEAD server.js package.json package-lock.json install.ps1 install.sh install.bat start.bat start.cmd fix-state.ps1 README.md ARCHITECTURE.md public agent -o temp-upload/sremote-server.zip`
   (git archive excludes locally compiled exes).

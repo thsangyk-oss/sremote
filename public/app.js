@@ -1686,7 +1686,8 @@ function palItems() {
     { kind: "ACT", label: "Toggle sidebar", sub: "Ctrl+B", run: () => { sideVisible = !sideVisible; localStorage.setItem("rd.sidebar", sideVisible ? "1" : "0"); applyToggles(); } },
     { kind: "ACT", label: "Go home", sub: "all projects", run: () => goHome() },
     { kind: "ACT", label: "File transfer", sub: "full file explorer", run: () => openExplorer() },
-    { kind: "ACT", label: "Remote screen", sub: "view & control desktop", run: openScreen },
+    ...(hostInfo.platform && hostInfo.platform !== "win32" ? [] :
+      [{ kind: "ACT", label: "Remote screen", sub: "view & control desktop", run: openScreen }]),
     { kind: "ACT", label: "Copy mode", sub: "copy terminal buffer", run: () => openCopy() },
     { kind: "ACT", label: "Search in terminal", sub: "Ctrl+F", run: () => setTimeout(openTermSearch, 0) },
     { kind: "ACT", label: "Split terminal…", sub: "two sessions side by side — any project", run: () => pickSplit() },
@@ -2663,6 +2664,9 @@ $("#new-ok").onclick = () => {
   hostInfo = info;
   $("#host-info").textContent = `${info.hostname || "?"} · ${info.tailscaleIp || location.hostname}`
     + (info.service ? ` · svc·${info.agent ? info.agent.user : "waiting-logon"}` : "");
+  // remote screen is Windows-only (DXGI/GDI agents) — hide it on linux/mac hosts
+  if (info.platform && info.platform !== "win32")
+    for (const id of ["#tool-screen", "#screen-btn"]) { const e = $(id); if (e) e.style.display = "none"; }
   for (const sh of info.shells || ["powershell"]) {
     for (const sel of [shellSel, $("#set-shell")]) {
       const o = document.createElement("option");
