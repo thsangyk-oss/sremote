@@ -90,23 +90,23 @@ class SremoteTray : Form {
   }
 
   // ---------- server lifecycle ----------
-  bool Running() { return OwnerPid() != 0; }
-  int OwnerPid() {
+  bool Running() {
     try {
       foreach (var p in IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners())
-        if (p.Port == Port) {
-          // endpoint found; map to pid via netstat (no managed api gives pid)
-          return NetstatPid();
-        }
+        if (p.Port == Port) return true;
     } catch { }
-    return 0;
+    return false;
   }
-  static int NetstatPid() {
+  // only needed to kill a non-service server; called on Stop, not per tick —
+  // the stdout must be drained fully or netstat stays blocked on a full pipe
+  // (a leaked zombie per call; the 2s tick used to pile them up endlessly)
+  int OwnerPid() {
     try {
       var psi = new ProcessStartInfo("netstat", "-ano -p tcp") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
       var pr = Process.Start(psi);
-      string line;
-      while ((line = pr.StandardOutput.ReadLine()) != null) {
+      string all = pr.StandardOutput.ReadToEnd();
+      if (!pr.WaitForExit(8000)) { try { pr.Kill(); } catch { } }
+      foreach (var line in all.Split('\n')) {
         var t = line.Trim();
         if (t.IndexOf("LISTENING", StringComparison.OrdinalIgnoreCase) < 0) continue;
         var parts = t.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
@@ -127,8 +127,8 @@ class SremoteTray : Form {
         var psi = new ProcessStartInfo("sc.exe", "qc SremoteService") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
         var pr = Process.Start(psi);
         pr.StandardOutput.ReadToEnd();
-        pr.WaitForExit(5000);
-        serviceState = pr.ExitCode == 0 ? 1 : 0;
+        if (pr.WaitForExit(5000)) serviceState = pr.ExitCode == 0 ? 1 : 0;
+        else { try { pr.Kill(); } catch { } }   // timeout: keep serviceState unknown, retry next tick
       } catch { serviceState = 0; }
     }
     return serviceState == 1;
@@ -137,7 +137,7 @@ class SremoteTray : Form {
     try {
       var psi = new ProcessStartInfo("sc.exe", verb + " SremoteService") { UseShellExecute = false, CreateNoWindow = true };
       var pr = Process.Start(psi);
-      pr.WaitForExit(10000);
+      if (!pr.WaitForExit(10000)) { try { pr.Kill(); } catch { } }
     } catch { }
   }
   void Start() {
@@ -170,7 +170,7 @@ class SremoteTray : Form {
         DateTime.Now.ToString("HH:mm:ss") + " " + msg + "\n"); } catch { }
   }
   void EnsureAgent() {
-    if (!HasService()) return;
+    if (serviceState == 0) return;   // only a definitive "no service" skips; unknown still tries
     try {
       var sess = Environment.GetEnvironmentVariable("SESSIONNAME") ?? "x";
       var pidFile = Path.Combine(root, "data", "agent-" + Environment.UserName + "-" + sess + ".pid");
