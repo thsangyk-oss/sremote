@@ -128,13 +128,24 @@ const IS_SERVICE = IS_WIN && (process.env.SREMOTE_SERVICE === "1" ||
 const AGENT_PORT = Number(process.env.SREMOTE_AGENT_PORT || 2210);
 const AGENT_KEY_FILE = path.join(DATA_DIR, "agent.key");
 let agentKey = "";
-const agents = new Map();   // "user|sess" -> {sock,user,sess,procs:Map}
+const agents = new Map();   // "user|sess" -> {sock,user,sess,sessId,console,procs:Map}
 let hostUser = null;        // user that owns the live session host
 
+// for PTYs/session-host ownership prefer a REAL user agent (correct context);
+// the SYSTEM console agent is just a screen/input relay
 function primaryAgent() {
-  let pick = null;
-  for (const a of agents.values()) { pick = a; if (a.sess === "Console") pick = a; }
-  return pick;   // newest wins; the physical console session wins ties
+  let pick = null, fallback = null;
+  for (const a of agents.values()) {
+    if (!a.console && a.user !== "SYSTEM") pick = a;
+    else fallback = a;
+  }
+  return pick || fallback;
+}
+// screen/input ops prefer the agent sitting in the physical console session —
+// it sees whatever is actually displayed, including the logon screen
+function screenRelayAgent() {
+  for (const a of agents.values()) if (a.console) return a;
+  return primaryAgent();
 }
 function agentSend(a, o) { if (a && a.sock.writable) a.sock.write(JSON.stringify(o) + "\n"); }
 
@@ -156,7 +167,8 @@ function agentListen() {
         if (!a) {   // first frame must be an authed hello
           if (m.op !== "hello" || !agentKey || m.key !== agentKey) { sock.destroy(); return; }
           a = { sock, user: String(m.user || "?"), sess: String(m.sess || ""),
-                procs: new Map(), id: `${m.user}|${m.sess || m.pid || ++seq}` };
+                sessId: m.sessId ?? null, console: !!m.console,
+                procs: new Map(), id: `${m.user}|${m.console ? "con" : ((m.sessId ?? m.sess) || m.pid || ++seq)}` };
           const old = agents.get(a.id);   // duplicate agent in the same session
           if (old) { for (const [, c] of old.procs) c.emit("exit"); try { old.sock.destroy(); } catch {} }
           agents.set(a.id, a);
@@ -190,8 +202,8 @@ function agentListen() {
 // spawn inside the active user session when running as a service. Returns a
 // fake {stdin.write, stdout.on('data'), on('exit'), kill} that walks the
 // existing screen code paths unchanged; a dead dummy when nobody's logged on.
-function spawnSessionProc(exe, args, opts) {
-  const a = IS_SERVICE ? primaryAgent() : null;
+function spawnSessionProc(exe, args, opts, who) {
+  const a = IS_SERVICE ? (who || primaryAgent()) : null;
   if (IS_SERVICE && !a) {
     const dead = new EventEmitter();
     dead.stdin = { write() {} };
@@ -763,6 +775,9 @@ const server = http.createServer((req, res) => {
       platform: os.platform(), shells: Object.keys(SHELLS),
       service: IS_SERVICE, hostUser,
       agent: pa ? { user: pa.user, sess: pa.sess } : null,
+      agents: IS_SERVICE ? [...agents.values()].map((x) => ({
+        user: x.user, sess: x.sess, sessId: x.sessId, console: x.console,
+      })) : undefined,
     }));
   }
   if (url.pathname.toLowerCase() === "/remote.md") {
@@ -1131,7 +1146,7 @@ function scrEnsure() {
   if (scrAgent) return;
   scrAgent = spawnSessionProc("powershell.exe",
     ["-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-File", SCR_PS1],
-    { stdio: ["pipe", "pipe", "ignore"] });
+    { stdio: ["pipe", "pipe", "ignore"] }, screenRelayAgent());
   let buf = "";
   scrAgent.stdout.on("data", (d) => {
     buf += d;
@@ -1196,7 +1211,7 @@ function scrProStopSoon() {
 }
 function scrProEnsure() {
   if (scrProAgent) return;
-  scrProAgent = spawnSessionProc(SCRPRO_EXE, [], { stdio: ["pipe", "pipe", "ignore"], windowsHide: true, cwd: SCRPRO_DIR });
+  scrProAgent = spawnSessionProc(SCRPRO_EXE, [], { stdio: ["pipe", "pipe", "ignore"], windowsHide: true, cwd: SCRPRO_DIR }, screenRelayAgent());
   scrProCredit = 2;
   const me = scrProAgent;
   scrProAgent.stdout.on("data", (d) => {
@@ -1339,7 +1354,7 @@ wss.on("connection", (ws, req) => {
           ws.send(JSON.stringify({ type: "screen", op: "err", msg: "screen share is Windows-only" }));
           break;
         }
-        if (IS_SERVICE && !primaryAgent() && (msg.op === "sub" || msg.op === "shot" || msg.op === "info")) {
+        if (IS_SERVICE && !screenRelayAgent() && (msg.op === "sub" || msg.op === "shot" || msg.op === "info")) {
           ws.send(JSON.stringify({ type: "screen", op: "err",
             msg: "no user session on the host — sign in there to enable remote screen" }));
           break;

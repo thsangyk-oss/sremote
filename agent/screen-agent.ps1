@@ -12,8 +12,22 @@ using System.Runtime.InteropServices;
 public static class U32 {
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, IntPtr extra);
+  [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
+  [DllImport("user32.dll", SetLastError = true)] public static extern bool SetThreadDesktop(IntPtr hDesktop);
+  [DllImport("user32.dll", SetLastError = true)] public static extern bool CloseDesktop(IntPtr hDesktop);
+  // Follow the visible desktop (Default <-> Winlogon on lock/logon transitions).
+  // Without this, capture keeps seeing our spawning desktop and returns black.
+  public static void AttachInputDesktop() {
+    foreach (uint acc in new uint[] { 0x10000000, 0x0100 }) {   // GENERIC_ALL, DESKTOP_SWITCHDESKTOP
+      IntPtr h = OpenInputDesktop(0, false, acc);
+      if (h == IntPtr.Zero) continue;
+      if (SetThreadDesktop(h)) { CloseDesktop(h); return; }
+      CloseDesktop(h);
+    }
+  }
 }
 '@
+function AttachInputDesktop { try { [U32]::AttachInputDesktop() } catch {} }
 
 function Say($o) { [Console]::Out.WriteLine(($o | ConvertTo-Json -Compress)) }
 function VScreen { [System.Windows.Forms.SystemInformation]::VirtualScreen }
@@ -65,9 +79,11 @@ function Send-Text($t) {
   [System.Windows.Forms.SendKeys]::SendWait($e)
 }
 
+AttachInputDesktop
 Say @{ op = 'ready' }
 while (($line = [Console]::In.ReadLine()) -ne $null) {
   try {
+    AttachInputDesktop
     $m = $line | ConvertFrom-Json
     switch ($m.op) {
       'ping'   { Say @{ op = 'pong' } }

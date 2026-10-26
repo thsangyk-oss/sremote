@@ -28,6 +28,28 @@ browser/Android ──WS :2209──> server.js ──JSONL pipe──> agent/se
   injection, built on demand by `/api/screen-pro`), legacy
   `agent/screen-agent.ps1`, `agent/tray/SremoteTray.exe` (Windows tray icon).
 
+## Service mode (AnyDesk-style, optional)
+
+`agent/service/SremoteService.exe` runs `server.js` as **SYSTEM** from boot
+(Session 0). Since Session 0 can't see user desktops or launch user-context
+processes, the broker opens a loopback agent link (`127.0.0.1:2210`, key in
+`data/agent.key`) and two kinds of agents connect:
+
+- **User agent** (`agent/user-agent.js`, tray-supervised, per logon session):
+  owns `session-host` in-session so PTYs run as the logged-in user; relays
+  screen agents' stdio. Pre-login the broker self-spawns a SYSTEM session-host;
+  on first user hello it sends `shutdown`, the host persists state, and the
+  user agent respawns it — scrollback survives the handover.
+- **Console agent** (same file, service-spawned via `CreateProcessAsUser` into
+  `WTSGetActiveConsoleSessionId`, `SREMOTE_CONSOLE=1`): runs as SYSTEM *inside*
+  the physical console session, which exists even at the logon screen —
+  that's how screen capture/input work before login. `screen-agent.ps1`
+  re-attaches its thread to `OpenInputDesktop` each op to follow the
+  Winlogon→Default transition at login.
+
+Routing in `server.js`: `primaryAgent()` (PTY/session work) prefers a real
+user agent; `screenRelayAgent()` (screen/input) prefers the console agent.
+
 ## Layout
 
 ```

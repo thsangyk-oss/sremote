@@ -103,8 +103,27 @@ function onMsg(m) {
   }
 }
 
+// the tray watches this file to respawn us when we die; the service-spawned
+// console-session variant (screen relay at the logon screen) uses a fixed name
+const PID_FILE = path.join(DATA_DIR, process.env.SREMOTE_CONSOLE
+  ? "agent-console.pid"
+  : `agent-${os.userInfo().username}-${process.env.SESSIONNAME || "x"}.pid`);
+
+// console variant self-dedup: if the service was restarted it may have spawned
+// a successor; the pid file then points at a live agent and we must bow out
+// instead of ping-ponging the broker link
+function staleConsoleAgent() {
+  if (!process.env.SREMOTE_CONSOLE || !PID_FILE) return false;
+  try {
+    const other = +fs.readFileSync(PID_FILE, "utf8");
+    if (other && other !== process.pid) { process.kill(other, 0); return true; }
+  } catch { /* dead or unreadable */ }
+  return false;
+}
+
 function connect() {
   if (sock) return;
+  if (staleConsoleAgent()) process.exit(0);
   const c = net.connect(PORT, "127.0.0.1");
   sock = c; buf = ""; authd = false;
   c.on("connect", () => {
@@ -113,6 +132,8 @@ function connect() {
     send({
       op: "hello", key, user: os.userInfo().username,
       sess: process.env.SESSIONNAME || "", pid: process.pid,
+      sessId: Number(process.env.SREMOTE_SESSION_ID) || null,
+      console: !!process.env.SREMOTE_CONSOLE,
     });
   });
   c.on("data", (d) => {
@@ -133,13 +154,9 @@ function connect() {
   c.on("error", () => {});
   c.on("close", drop);
 }
+if (!staleConsoleAgent()) { try { fs.writeFileSync(PID_FILE, String(process.pid)); } catch {} }
 connect();
 ensureHost();          // PTYs useful even before/without a broker link
 setInterval(() => { ensureHost(); }, 30000);   // cheap keep-alive for the broker's PTYs
-
-// the tray watches this file to respawn us when we die
-const PID_FILE = path.join(DATA_DIR,
-  `agent-${os.userInfo().username}-${process.env.SESSIONNAME || "x"}.pid`);
-try { fs.writeFileSync(PID_FILE, String(process.pid)); } catch {}
 
 log("user agent started pid", process.pid, "user", os.userInfo().username);
