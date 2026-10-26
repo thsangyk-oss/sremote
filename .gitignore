@@ -18,4 +18,6 @@ agent/screen-pro/ScreenPro.exe
 agent/screen-pro/ScreenPro.exe.new
 agent/screen-pro/ScreenPro.ver
 agent/tray/SremoteTray.exe
+agent/service/SremoteService.exe
+agent/service/*.exe
 .sremote-install

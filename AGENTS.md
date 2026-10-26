@@ -3,9 +3,17 @@
 Read `ARCHITECTURE.md` first — full map of server/UI/protocol/state so you don't have to re-derive it.
 
 ## Layout
-- `server.js` (Node, port 2209) + `agent/` (session broker, screen agents, tray) + `public/` (web UI, static, served from disk).
+- `server.js` (Node, port 2209) + `agent/` (session broker, screen agents, tray, service) + `public/` (web UI, static, served from disk).
 - `android/` — native Android client (Java, no AndroidX). Plan for the 2.0 redesign: `android/PLAN-v2.md`.
 - `install.ps1` / `fix-state.ps1` — Windows installer + recovery. Keep them saved as **UTF-8 with BOM** (PowerShell 5.1 `-File` misparses non-ASCII otherwise).
+
+## Service architecture (AnyDesk-style)
+- `agent/service/SremoteService.cs` → `SremoteService.exe` — real Windows service (name `SremoteService` = exe filename; sc.exe auto-start + `sc failure` restart actions). Spawns `node server.js` as **SYSTEM** with `SREMOTE_SERVICE=1`, watchdog respawns it, stdout → `data/service.log` (auto-trimmed >1 MB). Extra env overrides: `data/service.env` (`KEY=VALUE` lines, e.g. `SREMOTE_PORT`, `SREMOTE_AGENT_PORT`).
+- `agent/user-agent.js` — per-logon-session helper (tray keeps it alive; pid file `data/agent-<user>-<sess>.pid`). Connects JSONL over `127.0.0.1:2210` (`SREMOTE_AGENT_PORT`) authing with `data/agent.key` (installer grants `BUILTIN\Users:R`). Ensures `session-host.js` runs **in-session** (PTYs = user context) and relays screen agents' stdio (Session-0 can't see desktops).
+- Handover: pre-login the broker spawns a SYSTEM `session-host` (terminals work as SYSTEM); when a user agent connects, the host gets `shutdown` (flush+persist) and the agent respawns it in-session — scrollback survives.
+- Detection: `IS_SERVICE` = `SREMOTE_SERVICE=1` or `os.userInfo() === "SYSTEM"`. Non-service mode is unchanged (tray spawns node directly; screen/host spawn locally).
+- Tray (`agent/tray/SremoteTray.cs`): `sc.exe qc/start/stop SremoteService` when the service exists; supervises `user-agent.js`; falls back to owning `node server.js` when no service.
+- csc.exe builds: `/target:exe /r:System.ServiceProcess.dll` (service); `/target:winexe` (tray). Under Git Bash use `-flag` form (bare `/x` gets mangled to paths).
 
 ## Web UI
 - After editing `public/app.js` or `public/style.css`, bump `?v=` in `public/index.html` (cache busting).

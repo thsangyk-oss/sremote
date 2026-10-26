@@ -1,4 +1,4 @@
-# S-remote installer / updater for Windows
+﻿# S-remote installer / updater for Windows
 #   irm https://raw.githubusercontent.com/thsangyk-oss/sremote/main/install.ps1 | iex
 # Options (env): $env:SREMOTE_DIR to choose install dir
 $ErrorActionPreference = 'Stop'
@@ -295,10 +295,55 @@ if ($csc -and (Test-Path $traySrc)) {
     else { Write-Host "    WARN: tray compile failed (console start.cmd will be used)" }
 }
 
+# ---------- 4b. SYSTEM service (AnyDesk-style broker) --------------------------
+# a real Windows service keeps server.js alive from boot, before any logon;
+# once a user signs in, the tray's per-session user agent supplies terminals +
+# screen inside that session (a Session-0 service can't touch the desktop)
+$svcSrc = Join-Path $dir 'agent\service\SremoteService.cs'
+$svcExe = Join-Path $dir 'agent\service\SremoteService.exe'
+if ($csc -and (Test-Path $svcSrc)) {
+    & $csc.FullName /nologo /target:exe "/out:$svcExe" /r:System.ServiceProcess.dll $svcSrc | Out-Null
+    if (Test-Path $svcExe) { Write-Host "    service compiled: $svcExe" }
+    else { Write-Host "    WARN: service compile failed (logon task will start the server instead)" }
+}
+$svcOk = $false
+if (Test-Path $svcExe) {
+    try { net session >$null 2>&1 } catch {}
+    if ($LASTEXITCODE -eq 0) {
+        $exists = $false
+        try { sc.exe qc SremoteService >$null 2>&1; $exists = ($LASTEXITCODE -eq 0) } catch {}
+        if ($exists) {
+            sc.exe stop SremoteService >$null 2>&1
+            sc.exe config SremoteService binPath= "`"$svcExe`"" start= auto >$null 2>&1
+        } else {
+            sc.exe create SremoteService binPath= "`"$svcExe`"" start= auto DisplayName= "S-remote Broker" >$null 2>&1
+        }
+        sc.exe description SremoteService "S-remote broker - remote terminal/screen over Tailscale (starts at boot)" >$null 2>&1
+        sc.exe failure SremoteService reset= 86400 actions= restart/3000/restart/5000/restart/10000 >$null 2>&1
+        $svcOk = $true
+        Write-Host "    Windows service registered: SremoteService (auto-start + auto-restart)"
+    } else {
+        Write-Host "    no admin - service skipped, server starts at logon via the tray"
+    }
+}
+
+# agent.key - shared secret the per-session user agent sends the broker on
+# 127.0.0.1:2210. Pre-create it readable by local Users so agents on any
+# account can authenticate (localhost is already the trust boundary).
+$dataDir = Join-Path $dir 'data'
+New-Item -ItemType Directory -Force $dataDir | Out-Null
+$keyFile = Join-Path $dataDir 'agent.key'
+if (-not (Test-Path $keyFile)) {
+    $kb = New-Object byte[] 24; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($kb)
+    Set-Content $keyFile ([BitConverter]::ToString($kb) -replace '-','').ToLower() -Encoding ascii -NoNewline
+}
+try { icacls $keyFile /grant '*S-1-5-32-545:(R)' >$null 2>&1 } catch {}
+
 @"
 @echo off
 cd /d %~dp0
 if exist "%~dp0node\node.exe" set "PATH=%~dp0node;%PATH%"
+sc qc SremoteService >nul 2>&1 && (net start SremoteService >nul 2>&1 & exit /b)
 if exist "%~dp0agent\tray\SremoteTray.exe" (start "" "%~dp0agent\tray\SremoteTray.exe" & exit /b)
 start "" /min node server.js
 "@ | Set-Content (Join-Path $dir 'start.cmd') -Encoding ascii
@@ -337,6 +382,8 @@ if ($LASTEXITCODE -eq 0) {
 }
 
 # ---------- 5. (re)start -------------------------------------------------------
+# stop the service first - its auto-restart would relaunch the node we kill below
+try { sc.exe query SremoteService >$null 2>&1; if ($LASTEXITCODE -eq 0) { sc.exe stop SremoteService >$null 2>&1; Start-Sleep -Milliseconds 800 } } catch {}
 # stop old tray first - a running tray won't auto-revive a killed server,
 # and the fresh tray instance below starts the server itself
 Get-Process SremoteTray -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -354,8 +401,9 @@ Get-NetTCPConnection -LocalPort 2209 -State Listen -ErrorAction SilentlyContinue
         $p = Get-Process -Id $_ -ErrorAction SilentlyContinue
         if ($p -and $p.ProcessName -eq 'node') { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
     }
+if ($svcOk) { sc.exe start SremoteService >$null 2>&1 }
 try { schtasks /run /tn $taskName >$null 2>&1 } catch {}
-if ($LASTEXITCODE -ne 0) { Start-Process -FilePath "$dir\start.cmd" -WindowStyle Hidden }
+if (-not $svcOk -and $LASTEXITCODE -ne 0) { Start-Process -FilePath "$dir\start.cmd" -WindowStyle Hidden }
 Start-Sleep -Seconds 2
 
 try {

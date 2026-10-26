@@ -89,6 +89,11 @@ function persist() {
   }));
   try { fs.writeFileSync(SESS_FILE, JSON.stringify(list, null, 2)); } catch {}
 }
+function flush() {
+  for (const s of sessions.values())
+    if (s.sbDirty) try { fs.writeFileSync(sbFile(s.id), s.scrollback); } catch {}
+  persist();
+}
 function list() {
   return [...sessions.values()].map((s) => ({
     id: s.id, name: s.name, shell: s.shell, cwd: s.cwd,
@@ -193,7 +198,7 @@ function restore() {
 if (!IS_WIN) try { fs.rmSync(HOST_ADDR, { force: true }); } catch {}
 const srv = net.createServer((conn) => {
   conns.add(conn);
-  conn.write(JSON.stringify({ op: "ready" }) + "\n");
+  conn.write(JSON.stringify({ op: "ready", user: os.userInfo().username }) + "\n");
   conn.write(JSON.stringify({ op: "sessions", list: list() }) + "\n");
   let buf = "";
   conn.on("data", (d) => {
@@ -213,6 +218,11 @@ const srv = net.createServer((conn) => {
           case "rename": { const s = sessions.get(m.id); if (s && m.name) { s.name = String(m.name).slice(0, 60); persist(); bcast({ op: "sessions", list: list() }); } break; }
           case "list": conn.write(JSON.stringify({ op: "sessions", list: list() }) + "\n"); break;
           case "ping": conn.write(JSON.stringify({ op: "pong" }) + "\n"); break;
+          // broker runs as SYSTEM before logon and spawns a SYSTEM host so
+          // pre-login terminals work; once a user agent is up it asks us to
+          // hand over — persist, release the pipe, and let the user's own
+          // host respawn the sessions in-session (scrollback keeps the view)
+          case "shutdown": setImmediate(() => { flush(); process.exit(0); }); break;
         }
       } catch (e) { log("op error", m.op, e.message); }
     }
@@ -233,11 +243,6 @@ setInterval(() => {
   }
 }, 3000);
 for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
-  process.on(sig, () => {
-    for (const s of sessions.values())
-      if (s.sbDirty) try { fs.writeFileSync(sbFile(s.id), s.scrollback); } catch {}
-    persist();
-    process.exit(0);
-  });
+  process.on(sig, () => { flush(); process.exit(0); });
 }
 log("restored", sessions.size, "session(s)");

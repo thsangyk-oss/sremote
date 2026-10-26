@@ -1,4 +1,4 @@
-# S-remote state recovery
+﻿# S-remote state recovery
 #   irm https://raw.githubusercontent.com/thsangyk-oss/sremote/main/fix-state.ps1 | iex
 # Repairs machines where an old installer missed the original install dir
 # (e.g. C:\sremote) and did a fresh install into %LOCALAPPDATA% - wiping the
@@ -124,6 +124,18 @@ function Test-BroadDir($d) {
 if ([IO.Path]::GetFullPath($cur) -ne [IO.Path]::GetFullPath($target) -and (Test-Path $cur) -and -not (Test-BroadDir $cur)) {
     Write-Host ""
     Write-Host "==> stopping duplicate install at $cur"
+    # a Windows service whose binary lives inside the dupe dir would keep
+    # respawning its server â€” stop + un-register (the installer's re-run
+    # against $target registers a fresh one there)
+    try {
+        $qc = (sc.exe qc SremoteService 2>$null | Out-String)
+        if ($qc -match 'BINARY_PATH_NAME\s*:\s*"?([^"\r\n]+)"?' -and
+            $Matches[1].Trim().StartsWith($cur, [StringComparison]::OrdinalIgnoreCase)) {
+            sc.exe stop SremoteService | Out-Null
+            sc.exe delete SremoteService | Out-Null
+            Write-Host "    removed SremoteService service pointing into the dupe dir"
+        }
+    } catch {}
     $esc = [regex]::Escape($cur.TrimEnd('\'))
     $ourFiles = '(server\.js|agent[\\/][^"\\'']*\.(js|exe|ps1)|start\.(cmd|bat)|SremoteTray\.exe|ScreenPro\.exe)'
     $procs  = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue

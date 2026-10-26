@@ -258,6 +258,7 @@ function connect() {
       case "pong":
         for (const el of [$("#latency"), $("#latency2")]) if (el) el.textContent = `${Date.now() - m.t}ms`;
         break;
+      case "err": toast(m.msg || "error", "err"); break;
       case "screen": onScreenMsg(m); break;
     }
   };
@@ -2660,7 +2661,8 @@ $("#new-ok").onclick = () => {
 (async () => {
   const info = await fetch("/api/info").then((r) => r.json()).catch(() => ({}));
   hostInfo = info;
-  $("#host-info").textContent = `${info.hostname || "?"} · ${info.tailscaleIp || location.hostname}`;
+  $("#host-info").textContent = `${info.hostname || "?"} · ${info.tailscaleIp || location.hostname}`
+    + (info.service ? ` · svc·${info.agent ? info.agent.user : "waiting-logon"}` : "");
   for (const sh of info.shells || ["powershell"]) {
     for (const sel of [shellSel, $("#set-shell")]) {
       const o = document.createElement("option");

@@ -5,6 +5,7 @@ const path = require("path");
 const os = require("os");
 const { WebSocketServer } = require("ws");
 const { spawn, execFile, execFileSync } = require("child_process");
+const { EventEmitter } = require("events");
 const net = require("net");
 const crypto = require("crypto");
 
@@ -112,6 +113,105 @@ const SHELLS = IS_WIN
       return sh;
     })();
 
+// ---------- service mode: SYSTEM broker + per-session user agents ----------
+// Installed as a Windows service (agent/service), the broker is up from boot
+// before anyone logs on. A Session-0 service can't see user desktops or
+// spawn user-context shells, so agent/user-agent.js (started per logon
+// session by the tray) bridges those over a loopback link:
+//   screen agents  -> spawned in-session, stdin/stdout relayed here
+//   session host   -> the agent spawns it in-session; until a user signs in
+//                     we spawn it ourselves so pre-login SYSTEM shells work,
+//                     then hand the pipe over (sessions keep their scrollback)
+// Link auth: shared key at data/agent.key (installer grants Users:R).
+const IS_SERVICE = IS_WIN && (process.env.SREMOTE_SERVICE === "1" ||
+  (() => { try { return os.userInfo().username.toUpperCase() === "SYSTEM"; } catch { return false; } })());
+const AGENT_PORT = Number(process.env.SREMOTE_AGENT_PORT || 2210);
+const AGENT_KEY_FILE = path.join(DATA_DIR, "agent.key");
+let agentKey = "";
+const agents = new Map();   // "user|sess" -> {sock,user,sess,procs:Map}
+let hostUser = null;        // user that owns the live session host
+
+function primaryAgent() {
+  let pick = null;
+  for (const a of agents.values()) { pick = a; if (a.sess === "Console") pick = a; }
+  return pick;   // newest wins; the physical console session wins ties
+}
+function agentSend(a, o) { if (a && a.sock.writable) a.sock.write(JSON.stringify(o) + "\n"); }
+
+function agentListen() {
+  try { agentKey = fs.readFileSync(AGENT_KEY_FILE, "utf8").trim(); } catch {}
+  if (!/^[0-9a-f]{32,}$/i.test(agentKey)) {
+    try { fs.writeFileSync(AGENT_KEY_FILE, crypto.randomBytes(24).toString("hex"), { flag: "wx" }); } catch {}
+    try { agentKey = fs.readFileSync(AGENT_KEY_FILE, "utf8").trim(); } catch {}
+  }
+  const srv = net.createServer((sock) => {
+    let a = null, buf = "";
+    sock.on("data", (d) => {
+      buf += d;
+      let i;
+      while ((i = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, i); buf = buf.slice(i + 1);
+        if (!line.trim()) continue;
+        let m; try { m = JSON.parse(line); } catch { continue; }
+        if (!a) {   // first frame must be an authed hello
+          if (m.op !== "hello" || !agentKey || m.key !== agentKey) { sock.destroy(); return; }
+          a = { sock, user: String(m.user || "?"), sess: String(m.sess || ""),
+                procs: new Map(), id: `${m.user}|${m.sess || m.pid || ++seq}` };
+          const old = agents.get(a.id);   // duplicate agent in the same session
+          if (old) { for (const [, c] of old.procs) c.emit("exit"); try { old.sock.destroy(); } catch {} }
+          agents.set(a.id, a);
+          agentSend(a, { op: "hello-ok" });
+          agentSend(a, { op: "ensure-host" });
+          // user signed in while a SYSTEM host (pre-login fallback) holds the
+          // pipe -> hand over so terminals respawn in the user's context
+          if (hostSock && hostUser && hostUser.toUpperCase() === "SYSTEM")
+            hostSend({ op: "shutdown" });
+          continue;
+        }
+        switch (m.op) {
+          case "data": { const c = a.procs.get(m.id); if (c) c.stdout.emit("data", Buffer.from(m.b64, "base64")); break; }
+          case "exit":
+          case "err":  { const c = a.procs.get(m.id); if (c) { a.procs.delete(m.id); c.emit("exit"); } break; }
+        }
+      }
+    });
+    sock.on("error", () => {});
+    sock.on("close", () => {
+      if (a && agents.get(a.id) === a) {
+        agents.delete(a.id);
+        for (const [, c] of a.procs) c.emit("exit");
+      }
+    });
+  });
+  srv.on("error", (e) => console.error("agent link:", e.message));
+  srv.listen(AGENT_PORT, "127.0.0.1");
+}
+
+// spawn inside the active user session when running as a service. Returns a
+// fake {stdin.write, stdout.on('data'), on('exit'), kill} that walks the
+// existing screen code paths unchanged; a dead dummy when nobody's logged on.
+function spawnSessionProc(exe, args, opts) {
+  const a = IS_SERVICE ? primaryAgent() : null;
+  if (IS_SERVICE && !a) {
+    const dead = new EventEmitter();
+    dead.stdin = { write() {} };
+    dead.stdout = new EventEmitter();
+    dead.kill = () => {};
+    setImmediate(() => dead.emit("exit"));
+    return dead;
+  }
+  if (!a) return spawn(exe, args, opts);
+  const id = `p${++seq}`;
+  const child = new EventEmitter();
+  child.stdin = { write: (s) => agentSend(a, { op: "stdin", id, data: Buffer.from(String(s)).toString("base64") }) };
+  child.stdout = new EventEmitter();
+  child.kill = () => agentSend(a, { op: "kill", id });
+  a.procs.set(id, child);
+  agentSend(a, { op: "spawn", id, exe, args: args || [], cwd: opts && opts.cwd });
+  return child;
+}
+if (IS_SERVICE) agentListen();
+
 // ---------- session broker ----------
 // PTYs live in agent/session-host.js — a detached daemon — so terminal
 // sessions (and whatever runs inside them) survive server.js restarts.
@@ -126,8 +226,17 @@ let attachTok = 0, seq = 0, lastSpawn = 0;
 const pendingAttach = new Map(); // tok -> ws
 const sessions = new Map();      // id -> {id,name,shell,cwd,workspace,createdAt,exited,clients:Set}
 
+const hostQueue = [];   // ops while the host pipe is down (handover window)
 function hostSend(o) {
-  if (hostSock && hostSock.writable) hostSock.write(JSON.stringify(o) + "\n");
+  if (hostSock && hostSock.writable) { hostSock.write(JSON.stringify(o) + "\n"); return; }
+  if (o.op !== "in" && hostQueue.length < 50) hostQueue.push(o);
+}
+function wantHost() {
+  // a logged-on user's agent owns the host in-session; without one we spawn
+  // it ourselves — dev mode as the user, service mode as SYSTEM (pre-login)
+  const a = IS_SERVICE ? primaryAgent() : null;
+  if (a) agentSend(a, { op: "ensure-host" });
+  else spawnHost();
 }
 function spawnHost() {
   if (hostProc || Date.now() - lastSpawn < 3000) return;
@@ -142,6 +251,11 @@ function spawnHost() {
 }
 function onHostMsg(m) {
   switch (m.op) {
+    case "ready":
+      hostUser = m.user || null;
+      // the host a user agent spawned belongs to someone — never hand over
+      // back to ourselves; only a SYSTEM host gets replaced on logon
+      break;
     case "sessions":
       applySessions(m.list);
       broadcastSessions();
@@ -191,16 +305,19 @@ function hostConnect() {
       onHostMsg(m);
     }
   });
-  c.on("connect", () => { hostSock = c; hostFresh = true; });
+  c.on("connect", () => {
+    hostSock = c; hostFresh = true;
+    for (const o of hostQueue.splice(0)) hostSend(o);
+  });
   c.on("error", () => {});
   c.on("close", () => {
     hostConn = null;
-    if (hostSock === c) hostSock = null;
+    if (hostSock === c) { hostSock = null; hostUser = null; }
     setTimeout(hostConnect, 400); // also (re)spawns broker if it's down
-    spawnHost();
+    wantHost();
   });
   // first connect attempt fails when broker isn't up yet — spawn then retry
-  c.once("error", () => { spawnHost(); setTimeout(hostConnect, 400); });
+  c.once("error", () => { wantHost(); setTimeout(hostConnect, 400); });
 }
 function ensureHost() { hostConnect(); }
 
@@ -341,6 +458,9 @@ DELETE ${base}/api/sessions/<id>                  kill
 }
 
 function createSession({ shell = "powershell", cwd, cols = 120, rows = 32, workspace, name }) {
+  // service mode: no host and no user session to bring one up — the caller
+  // should show this; pre-login a SYSTEM host may exist and is usable
+  if (IS_SERVICE && !hostSock && !primaryAgent()) return null;
   const id = `s${Date.now().toString(36)}-${++seq}`;
   const wsp = workspace ? workspaceById(workspace) : null;
   const dir = wsp ? wsp.path : cwd && fs.existsSync(cwd) ? cwd : os.homedir();
@@ -637,9 +757,12 @@ const server = http.createServer((req, res) => {
 
   if (url.pathname === "/api/info") {
     res.writeHead(200, { "Content-Type": "application/json" });
+    const pa = IS_SERVICE ? primaryAgent() : null;
     return res.end(JSON.stringify({
       hostname: os.hostname(), tailscaleIp: tailscaleIPv4(), home: os.homedir(), root: ROOT,
       platform: os.platform(), shells: Object.keys(SHELLS),
+      service: IS_SERVICE, hostUser,
+      agent: pa ? { user: pa.user, sess: pa.sess } : null,
     }));
   }
   if (url.pathname.toLowerCase() === "/remote.md") {
@@ -787,7 +910,8 @@ const server = http.createServer((req, res) => {
       screenSubs: scrSubs().length,
       screenAgent: !!scrAgent, shotBusy: scrShotBusy,
       screenProSubs: scrProSubs().length, screenProAgent: !!scrProAgent, screenProInstalled: scrProOk(),
-      hostSock: !!hostSock, sessions: sessions.size,
+      hostSock: !!hostSock, hostUser, service: IS_SERVICE, agents: agents.size,
+      sessions: sessions.size,
     }));
   }
   if (url.pathname === "/api/peers" && req.method === "GET") return apiPeers(res);
@@ -926,6 +1050,7 @@ const server = http.createServer((req, res) => {
     req.on("end", () => {
       let opts = {}; try { opts = JSON.parse(body); } catch {}
       const s = createSession(opts);
+      if (!s) return jsonErr(res, 503, "no session host yet — sign in on the host machine to start terminals");
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ id: s.id }));
     });
@@ -1004,7 +1129,7 @@ function scrStopSoon() {
 }
 function scrEnsure() {
   if (scrAgent) return;
-  scrAgent = spawn("powershell.exe",
+  scrAgent = spawnSessionProc("powershell.exe",
     ["-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-File", SCR_PS1],
     { stdio: ["pipe", "pipe", "ignore"] });
   let buf = "";
@@ -1071,7 +1196,7 @@ function scrProStopSoon() {
 }
 function scrProEnsure() {
   if (scrProAgent) return;
-  scrProAgent = spawn(SCRPRO_EXE, [], { stdio: ["pipe", "pipe", "ignore"], windowsHide: true });
+  scrProAgent = spawnSessionProc(SCRPRO_EXE, [], { stdio: ["pipe", "pipe", "ignore"], windowsHide: true, cwd: SCRPRO_DIR });
   scrProCredit = 2;
   const me = scrProAgent;
   scrProAgent.stdout.on("data", (d) => {
@@ -1192,7 +1317,9 @@ wss.on("connection", (ws, req) => {
         break;
       case "create": {
         const ns = createSession({ shell: msg.shell, cwd: msg.cwd, cols: msg.cols, rows: msg.rows, workspace: msg.workspace, name: msg.name });
-        ws.send(JSON.stringify({ type: "created", id: ns.id }));
+        ws.send(ns
+          ? JSON.stringify({ type: "created", id: ns.id })
+          : JSON.stringify({ type: "err", msg: "no session host yet — sign in on the host machine" }));
         break;
       }
       case "rename":
@@ -1210,6 +1337,11 @@ wss.on("connection", (ws, req) => {
       case "screen": {
         if (!IS_WIN) {
           ws.send(JSON.stringify({ type: "screen", op: "err", msg: "screen share is Windows-only" }));
+          break;
+        }
+        if (IS_SERVICE && !primaryAgent() && (msg.op === "sub" || msg.op === "shot" || msg.op === "info")) {
+          ws.send(JSON.stringify({ type: "screen", op: "err",
+            msg: "no user session on the host — sign in there to enable remote screen" }));
           break;
         }
         const { type, ...cmd } = msg;
@@ -1250,7 +1382,7 @@ for (const w of state.workspaces) sweepTmpUpload(path.join(w.path, "temp-upload"
 
 server.listen(PORT, "0.0.0.0", () => {
   const ip = tailscaleIPv4();
-  console.log(`S-remote listening on :${PORT}`);
+  console.log(`S-remote listening on :${PORT}` + (IS_SERVICE ? ` (service, agent link 127.0.0.1:${AGENT_PORT})` : ""));
   console.log(`  local:     http://localhost:${PORT}`);
   if (ip) console.log(`  tailscale: http://${ip}:${PORT}`);
   console.log(`  restored:  ${sessions.size} session(s) from history`);

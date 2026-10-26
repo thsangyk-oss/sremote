@@ -25,6 +25,8 @@ class SremoteTray : Form {
   string root, exe;
   Icon iconRun, iconStop;
   Timer poll;
+  int serviceState = -1;   // -1 unknown, 0 no service (tray owns node), 1 service
+  int tickN;
 
   static int Main() {
     bool first;
@@ -64,10 +66,11 @@ class SremoteTray : Form {
     tray.DoubleClick += (s, e) => { if (Running()) OpenUi(); };
 
     poll = new Timer(); poll.Interval = 2000;
-    poll.Tick += (s, e) => RefreshState();
+    poll.Tick += (s, e) => { try { RefreshState(); } catch (Exception ex) { TLog("RefreshState: " + ex.Message); } try { EnsureAgent(); } catch (Exception ex) { TLog("EnsureAgent: " + ex.Message); } };
     poll.Start();
 
     Start();                                          // tray launch = server up
+    EnsureAgent();                                    // in-session helper for the broker
     RefreshState();
   }
 
@@ -116,8 +119,30 @@ class SremoteTray : Form {
     var p = Path.Combine(root, "node", "node.exe");   // portable node from installer
     return File.Exists(p) ? p : "node";               // else system PATH
   }
+  // when the broker runs as a SYSTEM service the tray only supervises the
+  // per-session user agent; without a service it owns node itself (old model)
+  bool HasService() {
+    if (serviceState < 0 || (++tickN % 60 == 0)) {
+      try {
+        var psi = new ProcessStartInfo("sc.exe", "qc SremoteService") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
+        var pr = Process.Start(psi);
+        pr.StandardOutput.ReadToEnd();
+        pr.WaitForExit(5000);
+        serviceState = pr.ExitCode == 0 ? 1 : 0;
+      } catch { serviceState = 0; }
+    }
+    return serviceState == 1;
+  }
+  static void Sc(string verb) {
+    try {
+      var psi = new ProcessStartInfo("sc.exe", verb + " SremoteService") { UseShellExecute = false, CreateNoWindow = true };
+      var pr = Process.Start(psi);
+      pr.WaitForExit(10000);
+    } catch { }
+  }
   void Start() {
     if (Running()) { RefreshState(); return; }
+    if (HasService()) { Sc("start"); RefreshState(); return; }
     try {
       var psi = new ProcessStartInfo(NodeExe(), "server.js") {
         WorkingDirectory = root, UseShellExecute = false,
@@ -131,11 +156,37 @@ class SremoteTray : Form {
   }
   void Stop() {
     try {
-      if (child != null && !child.HasExited) child.Kill();
+      if (HasService()) { Sc("stop"); }
+      else if (child != null && !child.HasExited) child.Kill();
       else { int pid = OwnerPid(); if (pid != 0) Process.GetProcessById(pid).Kill(); }
     } catch { }
     child = null;
     RefreshState();
+  }
+  // keep agent/user-agent.js alive in this session — it owns the in-session
+  // session-host (PTYs) and relays screen capture for the SYSTEM broker
+  void TLog(string msg) {
+    try { File.AppendAllText(Path.Combine(root, "data", "tray.log"),
+        DateTime.Now.ToString("HH:mm:ss") + " " + msg + "\n"); } catch { }
+  }
+  void EnsureAgent() {
+    if (!HasService()) return;
+    try {
+      var sess = Environment.GetEnvironmentVariable("SESSIONNAME") ?? "x";
+      var pidFile = Path.Combine(root, "data", "agent-" + Environment.UserName + "-" + sess + ".pid");
+      if (File.Exists(pidFile)) {
+        var pid = int.Parse(File.ReadAllText(pidFile).Trim());
+        var p = Process.GetProcessById(pid);          // throws when dead
+        if (p.ProcessName.StartsWith("node", StringComparison.OrdinalIgnoreCase)) return;
+      }
+    } catch (Exception ex) { TLog("agent check: " + ex.Message); }
+    try {
+      var psi = new ProcessStartInfo(NodeExe(), @"agent\user-agent.js") {
+        WorkingDirectory = root, UseShellExecute = false, CreateNoWindow = true
+      };
+      var a = Process.Start(psi);
+      TLog("agent spawned, pid " + (a != null ? a.Id : -1));
+    } catch (Exception ex) { TLog("agent spawn: " + ex.Message); }
   }
   void OpenUi() {
     try { Process.Start("http://localhost:" + Port); } catch { }
@@ -160,7 +211,13 @@ class SremoteTray : Form {
     tray.Text = run ? "S-remote (running :2209)" : "S-remote (stopped)";
     try {
       var k = Registry.CurrentUser.OpenSubKey(RunKey, false);
-      miAuto.Checked = k != null && k.GetValue(RunName) != null;
+      if (HasService()) {          // boot-time autostart is the service's job
+        miAuto.Text = "Starts at boot (service)";
+        miAuto.Enabled = false;
+        miAuto.Checked = true;
+      } else {
+        miAuto.Checked = k != null && k.GetValue(RunName) != null;
+      }
     } catch { }
   }
   void Exit() {
