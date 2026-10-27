@@ -44,6 +44,18 @@ function toast(msg, kind = "ok") {
   setTimeout(() => { t.classList.add("out"); setTimeout(() => t.remove(), 260); }, 3200);
 }
 
+// the APK assigns window.__nativeKb (keyboard px it slid the WebView by);
+// turn the assignment into an event so overlays can re-place themselves
+(() => {
+  let v = window.__nativeKb;
+  try {
+    Object.defineProperty(window, "__nativeKb", {
+      configurable: true, get: () => v,
+      set: (n) => { if (n === v) return; v = n; dispatchEvent(new Event("nativekb")); },
+    });
+  } catch {}
+})();
+
 // clipboard works over plain http too (tailscale isn't a secure context)
 function copyToClipboard(t) {
   if (navigator.clipboard?.writeText) { navigator.clipboard.writeText(t).catch(() => fallbackCopy(t)); return; }
@@ -52,6 +64,7 @@ function copyToClipboard(t) {
 function fallbackCopy(t) {
   const ta = document.createElement("textarea");
   ta.value = t; ta.style.cssText = "position:fixed;top:0;left:0;opacity:0";
+  ta.readOnly = true; ta.inputMode = "none"; // focus must not raise the soft keyboard
   document.body.appendChild(ta); ta.focus(); ta.select();
   try { document.execCommand("copy"); } catch {}
   ta.remove();
@@ -403,25 +416,112 @@ function ensurePane(id) {
   // mobile swipe-scroll: xterm v6 uses a virtual SmoothScrollableElement —
   // scrollTop hacks no longer work; feed finger deltas to term.scrollLines.
   // Long-press (~450ms, no move) switches to select mode: synthesized mouse
-  // events drive xterm's own drag-select; on release the selection is copied.
+  // events drive xterm's own drag-select; on release a Copy/Lines/✕ bar shows.
+  // The events carry the "force selection" modifier (Shift, or Option on
+  // Mac-like platforms) so TUIs with mouse tracking (Claude, Devin) don't eat
+  // the drag — same as Shift+drag on desktop. Double-tap selects one line.
   const WHEEL_STEP = 3; // swipe lines per synthesized wheel notch
+  const MAC_PLAT = /Mac/.test(navigator.platform || "");
   let tY = null, tAcc = 0, selMode = false, suppressCtx = false;
-  let lpTimer = null, lpX = 0, lpY = 0;
+  let lpTimer = null, lpX = 0, lpY = 0, mvX = 0, mvY = 0, moved = false, lastTap = null;
+  // keyboard opens on a finished tap, never on touchstart: popping it mid-press
+  // slides the frame up under the finger and kills the long-press. Deferred
+  // past the double-tap window (Android keeps the tap's user activation);
+  // iOS only raises the keyboard from a synchronous focus().
+  const IOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (MAC_PLAT && navigator.maxTouchPoints > 1);
+  let focusTimer = null, kbGuard = null, kbKeep = null;
+  // blurred mid-selection with the keyboard up: take focus straight back
+  // before the IME hides (the APK slides the WebView natively; no JS freeze)
+  if (term.textarea) term.textarea.addEventListener("focusout", () => { if (kbKeep && selMode) kbKeep.focus(); });
+  const softKbUp = () => window.__nativeKb > 0
+    || (navigator.virtualKeyboard && navigator.virtualKeyboard.boundingRect.height > 60)
+    || (window.visualViewport && innerHeight - visualViewport.height > 60);
+  const cancelFocus = () => { if (focusTimer) { clearTimeout(focusTimer); focusTimer = null; } };
   const linePx = () => {
     const d = term._core && term._core._renderService && term._core._renderService.dimensions;
     return (d && d.css && d.css.cell && d.css.cell.height) || 17;
   };
   const scrEl = () => el.querySelector(".xterm-screen") || el;
-  const fireMouse = (type, x, y, tgt) =>
-    (tgt || document).dispatchEvent(new MouseEvent(type, { clientX: x, clientY: y, button: 0, bubbles: true, cancelable: true }));
+  // detail:1 = single click (xterm ignores detail 0). The modifier only when the
+  // app tracks the mouse: otherwise xterm treats Shift as "extend selection".
+  const fireMouse = (type, x, y, tgt) => {
+    const force = term.modes.mouseTrackingMode !== "none";
+    (tgt || document).dispatchEvent(new MouseEvent(type, {
+      clientX: x, clientY: y, button: 0, detail: 1, bubbles: true, cancelable: true,
+      shiftKey: force && !MAC_PLAT, altKey: force && MAC_PLAT,
+    }));
+  };
   const clearLp = () => { if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; } };
+  // selection action bar (touch): copy on demand instead of on release, so a
+  // fat-finger end point can be widened to whole lines or dropped
+  const selBar = document.createElement("div");
+  selBar.className = "sel-bar hidden";
+  const selBtn = (label, fn) => {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.addEventListener("click", (e) => { e.stopPropagation(); fn(); });
+    selBar.appendChild(b);
+  };
+  const hideSelBar = () => selBar.classList.add("hidden");
+  selBtn("Copy", () => { copySel(term); term.clearSelection(); hideSelBar(); });
+  selBtn("Lines", () => {
+    const r = term.getSelectionPosition();
+    if (r) term.selectLines(Math.min(r.start.y, r.end.y), Math.max(r.start.y, r.end.y));
+  });
+  selBtn("✕", () => { term.clearSelection(); hideSelBar(); });
+  el.appendChild(selBar);
+  // placed just above the finger (below it near the top) inside what's
+  // actually visible — with the soft keyboard up the frame is slid upward.
+  // Anchor is pane-relative so it survives the slide; re-placed whenever the
+  // keyboard comes or goes (a tap's own focus can raise it)
+  let selAnchor = 0;
+  const placeSelBar = () => {
+    if (selBar.classList.contains("hidden")) return;
+    const vv = window.visualViewport, elTop = el.getBoundingClientRect().top;
+    // the APK slides its root up by __nativeKb device px (native header
+    // included, so this errs low): that much of the page top is off-screen
+    const nativeTop = window.__nativeKb > 0 ? window.__nativeKb / devicePixelRatio : 0;
+    const visTop = Math.max(elTop, vv ? vv.offsetTop : 0, nativeTop) + 4;
+    const y = elTop + selAnchor, h = selBar.offsetHeight || 40;
+    let top = y - h - 44;
+    if (top < visTop) top = Math.max(visTop, y + 36);
+    selBar.style.top = Math.round(top - elTop) + "px";
+  };
+  const showSelBar = (y) => {
+    if (!term.hasSelection()) return;
+    selAnchor = y - el.getBoundingClientRect().top;
+    selBar.classList.remove("hidden");
+    placeSelBar();
+  };
+  const replaceSoon = () => { setTimeout(placeSelBar, 60); setTimeout(placeSelBar, 450); };
+  if (window.visualViewport) visualViewport.addEventListener("resize", replaceSoon);
+  addEventListener("nativekb", replaceSoon);
+  if (navigator.virtualKeyboard) navigator.virtualKeyboard.addEventListener("geometrychange", replaceSoon);
+  term.onSelectionChange(() => { if (!term.hasSelection()) hideSelBar(); });
+  const rowAt = (y) => {
+    const top = scrEl().getBoundingClientRect().top;
+    const r = Math.min(term.rows - 1, Math.max(0, Math.floor((y - top) / linePx())));
+    return term.buffer.active.viewportY + r;
+  };
   el.addEventListener("touchstart", (e) => {
-    tY = e.touches.length === 1 ? e.touches[0].clientY : null; tAcc = 0;
+    if (selBar.contains(e.target)) { tY = null; moved = true; return; }
+    tY = e.touches.length === 1 ? e.touches[0].clientY : null; tAcc = 0; moved = false;
     if (e.touches.length === 1) {
       lpX = e.touches[0].clientX; lpY = e.touches[0].clientY;
       lpTimer = setTimeout(() => {
-        lpTimer = null; selMode = true; tY = null;
+        lpTimer = null; selMode = true; tY = null; mvX = lpX; mvY = lpY; cancelFocus();
         try { navigator.vibrate && navigator.vibrate(15); } catch {}
+        // Keep the soft keyboard exactly as it was for the whole drag — it
+        // appearing/disappearing slides the frame under the finger.
+        // Down: xterm focus()es its textarea on mousedown and, since Android
+        // counts as Linux, on every selection change (primary-selection
+        // emulation) → readonly until release (judged by keyboard height: the
+        // textarea is often focused with the keyboard down).
+        // Up: Chrome's own long-press blurs the textarea → refocus at once
+        // (kbKeep) and freeze the page's frame offset (__kbHold).
+        kbGuard = !softKbUp() && term.textarea ? term.textarea : null;
+        if (kbGuard) kbGuard.readOnly = true;
+        else { window.__kbHold = true; kbKeep = term.textarea; }
         fireMouse("mousedown", lpX, lpY, scrEl());
       }, 450);
     }
@@ -429,9 +529,14 @@ function ensurePane(id) {
   el.addEventListener("touchmove", (e) => {
     if (e.touches.length !== 1) return;
     const t = e.touches[0];
-    if (selMode) { fireMouse("mousemove", t.clientX, t.clientY); return; }
+    if (selMode) {
+      if (e.cancelable) e.preventDefault(); // no page scroll / pull-to-refresh while selecting
+      mvX = t.clientX; mvY = t.clientY;
+      fireMouse("mousemove", mvX, mvY);
+      return;
+    }
     const ddx = t.clientX - lpX, ddy = t.clientY - lpY;
-    if (ddx * ddx + ddy * ddy > 120) clearLp();
+    if (ddx * ddx + ddy * ddy > 120) { clearLp(); moved = true; }
     if (tY == null) return;
     const y = t.clientY, dy = tY - y;
     tY = y;
@@ -452,19 +557,50 @@ function ensurePane(id) {
           clientX: t.clientX, clientY: t.clientY, bubbles: true, cancelable: true,
         }));
     } else term.scrollLines(n);
-  }, { passive: true });
-  const endTouch = () => {
-    tY = null; clearLp();
+  });
+  // non-passive: preventDefault stops the compat mouse events a tap would
+  // otherwise synthesize (they'd clear the selection we just made)
+  let lastTouchAt = 0;
+  const endTouch = (e) => {
+    tY = null; clearLp(); lastTouchAt = Date.now();
     if (selMode) {
-      selMode = false; suppressCtx = true;
-      fireMouse("mouseup", lpX, lpY);
-      copySel(term);
+      selMode = false; suppressCtx = true; lastTap = null;
+      fireMouse("mouseup", mvX, mvY);
+      if (kbGuard) { kbGuard.blur(); kbGuard.readOnly = false; kbGuard = null; }
+      kbKeep = null;
+      if (e.cancelable) e.preventDefault();
+      e.stopPropagation(); // not a swipe-to-switch-session
+      showSelBar(mvY);
+      if (window.__kbHold) { window.__kbHold = false; if (window.__kbApply) window.__kbApply(); placeSelBar(); }
+      return;
+    }
+    if (e.type !== "touchend" || moved || e.touches.length) { lastTap = null; return; }
+    const now = Date.now();
+    if (lastTap && now - lastTap.t < 350 && Math.abs(lpX - lastTap.x) < 30 && Math.abs(lpY - lastTap.y) < 30) {
+      lastTap = null; cancelFocus();
+      if (e.cancelable) e.preventDefault();
+      e.stopPropagation();
+      const row = rowAt(lpY);
+      term.selectLines(row, row);
+      showSelBar(lpY);
+    } else {
+      lastTap = { t: now, x: lpX, y: lpY };
+      if (IOS) term.focus();
+      else { cancelFocus(); focusTimer = setTimeout(() => { focusTimer = null; term.focus(); }, 360); }
     }
   };
-  el.addEventListener("touchend", endTouch, { passive: true });
-  el.addEventListener("touchcancel", endTouch, { passive: true });
-  el.addEventListener("contextmenu", (e) => { if (suppressCtx) { suppressCtx = false; e.preventDefault(); } });
-  el.addEventListener("mouseup", () => setTimeout(() => copySel(term), 0)); // desktop drag-select → auto-copy
+  el.addEventListener("touchend", endTouch);
+  el.addEventListener("touchcancel", endTouch);
+  // Android's own long-press fires contextmenu at ~500ms. Capture phase:
+  // xterm's handler (right-click paste) would focus its textarea with user
+  // activation → keyboard pops up
+  el.addEventListener("contextmenu", (e) => {
+    if (selMode || lpTimer || suppressCtx) { suppressCtx = false; e.preventDefault(); e.stopPropagation(); }
+  }, true);
+  el.addEventListener("mouseup", () => { // desktop drag-select → auto-copy (touch uses the bar)
+    if (Date.now() - lastTouchAt < 1000) return;
+    setTimeout(() => copySel(term), 0);
+  });
   // jump-to-latest: floating button, visible only while scrolled away from the bottom
   const jumpBtn = document.createElement("button");
   jumpBtn.className = "jump-latest hidden";
@@ -488,7 +624,6 @@ function ensurePane(id) {
     return true;
   });
   panes.set(id, p);
-  el.addEventListener("touchstart", () => term.focus(), { passive: true }); // open keyboard on tap
   el.addEventListener("mousedown", () => focusSide(id)); // split: pane click claims focus
   return p;
 }
@@ -2705,12 +2840,14 @@ $("#new-ok").onclick = () => {
       return c;
     };
     const apply = () => {
+      if (window.__kbHold) return; // touch selection in progress (see ensurePane)
       const px = covered();
       const kb = px > 60;
       document.body.style.transform = !(window.__nativeKb > 0) && kb
           ? `translateY(${-px}px)` : "";
       if (!kb) requestAnimationFrame(fitVisible); // genuine resizes only
     };
+    window.__kbApply = apply;
     if (navigator.virtualKeyboard) {
       try { navigator.virtualKeyboard.overlaysContent = true; } catch (e) {}
       navigator.virtualKeyboard.addEventListener("geometrychange", apply);
