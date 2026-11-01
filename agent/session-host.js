@@ -71,8 +71,13 @@ function trackModes(modes, d) {
   for (const m of d.matchAll(MODE_RE))
     for (const p of m[1].split(";")) if (ALT_MODES.includes(p) || MOUSE_MODES.includes(p)) modes[p] = m[2] === "h";
 }
+// Terminal queries (DA, DSR/CPR, DECRQM, XTVERSION, window-size, kitty kbd,
+// OSC 4/10-19/52 "?", DECRQSS/XTGETTCAP). Replayed, the client's xterm
+// answers them again and the replies land in the app's input as garbage
+// (e.g. "]11;rgb:1e1e/1e1e/1e1e" in Claude's prompt) — never replay them.
+const QUERY_RE = /\x1b\[[>=]?0?c|\x1b\[\??\d+n|\x1b\[\??\d+\$p|\x1b\[>0?q|\x1b\[\?u|\x1b\[(?:1[13-9]|2[01])(?:;\d*)?t|\x1b\](?:4;\d+|1\d|52;[^;\x07\x1b]*);\?(?:\x07|\x1b\\)|\x1bP[$+]q[^\x1b]*\x1b\\/g;
 function replayData(s) {
-  let data = s.scrollback.toString("utf8");
+  let data = s.scrollback.toString("utf8").replace(QUERY_RE, "");
   const cur = s.modes || {}, curAlt = ALT_MODES.some((p) => cur[p]);
   const end = {}; trackModes(end, data);
   const toggled = ALT_MODES.some((p) => p in end), endAlt = ALT_MODES.some((p) => end[p]);

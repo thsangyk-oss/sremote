@@ -1333,7 +1333,15 @@ wss.on("connection", (ws, req) => {
         if (s) { s.clients.delete(ws); ws._attached = null; }
         break;
       case "in":
-        if (s && !s.exited) hostSend({ op: "in", id: s.id, data: msg.data });
+        if (!s || s.exited) break;
+        // every attached client's xterm answers each query — the 2nd copy (or a
+        // late one over a slow link) is read as typed text. Only the client that
+        // last typed (else the first to answer) gets to reply.
+        if (msg.rep) {
+          if (s.clients.has(s.inputWs) && s.inputWs !== ws) break;
+          s.inputWs = ws;
+        } else s.inputWs = ws;
+        hostSend({ op: "in", id: s.id, data: msg.data });
         break;
       case "resize":
         if (s && !s.exited) hostSend({ op: "resize", id: s.id, cols: msg.cols, rows: msg.rows });

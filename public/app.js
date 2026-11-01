@@ -612,7 +612,13 @@ function ensurePane(id) {
     const b = term.buffer.active;
     jumpBtn.className = (b.viewportY < b.baseY) ? "jump-latest" : "jump-latest hidden";
   });
-  term.onData((d) => send({ type: "in", id, data: d }));
+  // auto-replies to terminal queries: dropped while scrollback replays (stale
+  // questions), flagged otherwise so the server lets only one client answer
+  term.onData((d) => {
+    const rep = isTermReport(d);
+    if (rep && p.replayUntil > Date.now()) return;
+    send({ type: "in", id, data: d, rep: rep || undefined });
+  });
   term.onResize(({ cols, rows }) => send({ type: "resize", id, cols, rows }));
   term.onTitleChange((t) => { p.title = t; renderTabs(); });
   term.attachCustomKeyEventHandler((e) => {
@@ -1606,6 +1612,10 @@ function reqNotifPerm() { // one-time, lazily from a user gesture
   notifAsked = true;
   try { Notification.requestPermission(); } catch {}
 }
+// xterm's own answers to app queries (DA1/2, CPR/DSR, DECRPM, OSC color, DCS,
+// window size, kitty kbd) — nothing a user types looks entirely like this
+const TERM_REPORT_RE = /^(?:\x1b\[[?>][\d;]*c|\x1b\[\??[\d;]+[Rn]|\x1b\[\??[\d;]+\$y|\x1b\[[\d;]+t|\x1b\[\?\d+u|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1bP[^\x1b]*\x1b\\)+$/;
+const isTermReport = (d) => TERM_REPORT_RE.test(d);
 // BEL, OSC 777, or OSC 9 — but NOT OSC 9;4 (taskbar progress, fires constantly)
 function hasAttentionSeq(d) {
   if (d.includes("\x07") || d.includes("\x1b]777;")) return true;
