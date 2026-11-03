@@ -1265,11 +1265,12 @@ async function renderMachines() {
     d.className = "peer-row" + (p.online ? "" : " off");
     const tag = !p.online ? "offline" : p.direct ? "direct" : p.relay ? `relay ${p.relay}` : "—";
     d.innerHTML = `<span class="peer-dot${p.online ? " on" : ""}"></span>
-      <span class="peer-name">${esc(p.hostname || "?")}${p.self ? ` <span class="peer-self">(this machine)</span>` : ""}</span>
+      <span class="peer-name">${esc(p.name || p.hostname || "?")}${p.name && p.hostname && p.name !== p.hostname ? ` <span class="peer-host">${esc(p.hostname)}</span>` : ""}${p.self ? ` <span class="peer-self">(this machine)</span>` : ""}</span>
       <span class="peer-os">${esc(p.os || "")}</span>
       <span class="peer-tag">${esc(tag)}</span>
       ${p.sremote ? `<span class="peer-sr">S-remote ✓</span>` : ""}`;
-    if (!p.self && p.sremote && p.ip) { // peer runs S-remote → click opens its UI
+    if (p.self) { d.classList.add("link"); d.title = "Rename this machine"; d.onclick = (e) => machineMenu(e); }
+    else if (p.sremote && p.ip) { // peer runs S-remote → click opens its UI
       d.classList.add("link");
       d.title = `http://${p.ip}:2209`;
       d.onclick = () => window.open(`http://${p.ip}:2209`, "_blank");
@@ -1277,6 +1278,34 @@ async function renderMachines() {
     box.appendChild(d);
   }
 }
+
+// ---------- this machine's display name (shown to tailnet peers too) ----------
+function applyMachineName() {
+  const name = hostInfo.name || hostInfo.hostname || "";
+  $("#machine-name").textContent = name;
+  $("#machine-chip").classList.toggle("hidden", !name);
+  $("#host-info").textContent = `${name || "?"} · ${hostInfo.tailscaleIp || location.hostname}`
+    + (hostInfo.service ? ` · svc·${hostInfo.agent ? hostInfo.agent.user : "waiting-logon"}` : "");
+  setTitle();
+}
+async function setMachineName(name) {
+  const j = await fetch("/api/machine-name", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }),
+  }).then((r) => r.json()).catch(() => null);
+  if (!j) return toast("Rename failed");
+  hostInfo.name = j.name; applyMachineName(); renderMachines();
+  toast(`Machine name: ${j.name}`);
+}
+function machineMenu(e) {
+  const items = [{ label: "Rename machine…", run: async () => {
+    const v = await askText("Machine name", hostInfo.name);
+    if (v && v !== hostInfo.name) setMachineName(v);
+  } }];
+  if (hostInfo.name !== hostInfo.hostname)
+    items.push({ label: `Reset to “${hostInfo.hostname}”`, run: () => setMachineName("") });
+  showMenu(e, items);
+}
+$("#machine-chip").onclick = (e) => machineMenu(e);
 
 // ---------- home: dev servers (listening ports) ----------
 const DEV_SKIP_PROC = new Set(["System", "svchost.exe", "services.exe", "lsass.exe", "spoolsv.exe", "wininit.exe", "Idle", "Registry"]);
@@ -1602,9 +1631,11 @@ snipModal.onclick = (e) => { if (e.target === snipModal) snipModal.classList.add
 // ---------- notifications (bell / idle) ----------
 const notifiedSess = new Set(); // sessions with an unread notification (drives .tab.bell)
 const BASE_TITLE = document.title;
-const titleFor = () => view === "work"
-  ? `${(currentWs && wsById(currentWs) ? wsById(currentWs).name : "Standalone")} — ${BASE_TITLE}`
-  : BASE_TITLE;
+// machine name in the tab title tells several S-remote tabs apart
+const titleFor = () => {
+  const base = hostInfo.name ? `${hostInfo.name} — ${BASE_TITLE}` : BASE_TITLE;
+  return view === "work" ? `${(currentWs && wsById(currentWs) ? wsById(currentWs).name : "Standalone")} — ${base}` : base;
+};
 const setTitle = () => { document.title = (notifiedSess.size ? "● " : "") + titleFor(); };
 let notifAsked = false;
 function reqNotifPerm() { // one-time, lazily from a user gesture
@@ -2807,8 +2838,7 @@ $("#new-ok").onclick = () => {
 (async () => {
   const info = await fetch("/api/info").then((r) => r.json()).catch(() => ({}));
   hostInfo = info;
-  $("#host-info").textContent = `${info.hostname || "?"} · ${info.tailscaleIp || location.hostname}`
-    + (info.service ? ` · svc·${info.agent ? info.agent.user : "waiting-logon"}` : "");
+  applyMachineName();
   // remote screen is Windows-only (DXGI/GDI agents) — hide it on linux/mac hosts
   if (info.platform && info.platform !== "win32")
     for (const id of ["#tool-screen", "#screen-btn"]) { const e = $(id); if (e) e.style.display = "none"; }

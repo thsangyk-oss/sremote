@@ -44,6 +44,8 @@ try { state = { workspaces: [], sessions: [], ...JSON.parse(fs.readFileSync(STAT
 function saveState() {
   try { fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2)); } catch {}
 }
+// user-chosen machine name (Home → rename), else the OS hostname
+const machineName = () => state.machineName || os.hostname();
 let wsSeq = 0;
 function workspaceById(id) { return state.workspaces.find((w) => w.id === id); }
 
@@ -406,9 +408,9 @@ function remoteGuide(req) {
   const projects = state.workspaces.map((w) => `| ${w.name} | \`${w.path}\` | \`${w.id}\` |`).join("\n");
   const live = sessionList().filter((s) => !s.exited).map((s) => `\`${s.name}\``).join(", ");
   const ex = win ? "C:\\path\\to\\project" : "/path/to/project";
-  return `# Remote terminal on ${os.hostname()} (S-remote)
+  return `# Remote terminal on ${machineName()} (S-remote)
 
-You have been given access to **${os.hostname()}** (${win ? "Windows" : os.platform()}, address \`${addr}\`).
+You have been given access to **${machineName()}** (${win ? "Windows" : os.platform()}, address \`${addr}\`).
 Its terminal is driven over HTTP through S-remote at \`${base}\`. Every session you open shows up
 live in the owner's S-remote web UI, so they can watch or take over at any time.
 
@@ -579,6 +581,8 @@ async function apiPeers(res) {
       if (rr.ok) p.sremote = await rr.json();
     } catch {}
   }));
+  // S-remote peers advertise their display name in /api/info
+  for (const p of peers) p.name = p.self ? machineName() : (p.sremote && p.sremote.name) || p.hostname;
   res.writeHead(200, { "Content-Type": "application/json" });
   res.end(JSON.stringify({ peers }));
 }
@@ -775,10 +779,20 @@ const server = http.createServer((req, res) => {
     res.writeHead(403); return res.end("tailnet/localhost only");
   }
 
+  if (url.pathname === "/api/machine-name" && req.method === "POST") {
+    return readBody(req, res, (b) => {
+      // empty → back to the OS hostname
+      state.machineName = String(b.name || "").replace(/[\x00-\x1f\x7f]/g, "").trim().slice(0, 64) || undefined;
+      saveState();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ name: machineName() }));
+    });
+  }
   if (url.pathname === "/api/info") {
     res.writeHead(200, { "Content-Type": "application/json" });
     const pa = IS_SERVICE ? primaryAgent() : null;
     return res.end(JSON.stringify({
+      name: machineName(), // display name; peers on the tailnet read it from here
       hostname: os.hostname(), tailscaleIp: tailscaleIPv4(), home: os.homedir(), root: ROOT,
       platform: os.platform(), shells: Object.keys(SHELLS),
       service: IS_SERVICE, hostUser,

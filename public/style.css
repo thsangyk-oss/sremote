@@ -532,6 +532,12 @@ body.light #disc-overlay span { background: rgba(214,69,69,.1); border-color: rg
 .peer-dot.on { background: var(--accent2); box-shadow: 0 0 7px var(--accent2); }
 .peer-name { font-weight: 600; font-size: 13px; }
 .peer-self { color: var(--fg-dim); font-weight: 400; font-size: 11px; }
+.peer-host { color: var(--fg-dim); font-weight: 400; font-size: 11px; }
+.machine-chip { display: inline-flex; align-items: center; gap: 7px; min-width: 0; max-width: 260px; font: inherit; font-size: 13px; font-weight: 600; color: var(--fg); background: var(--glass); border: 1px solid var(--glass-brd); border-radius: 999px; padding: 5px 12px; cursor: pointer; }
+.machine-chip:hover { border-color: var(--border-hi); }
+.machine-chip #machine-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.machine-chip .ic { width: 15px; height: 15px; flex-shrink: 0; }
+.machine-chip .mc-edit { width: 12px; height: 12px; opacity: .5; }
 .peer-os { font-size: 11px; color: var(--fg-dim); }
 .peer-tag { margin-left: auto; font-size: 10px; font-weight: 700; letter-spacing: .5px; color: var(--fg-dim); background: var(--bg3); border-radius: 4px; padding: 2px 7px; }
 .peer-sr { font-size: 10px; font-weight: 700; color: var(--accent2); background: rgba(52,211,153,.12); border-radius: 4px; padding: 2px 7px; white-space: nowrap; }
