@@ -123,10 +123,17 @@ function safeCwd(cwd) {
 
 function spawnProc(s) {
   const sh = SHELLS[s.shell] || SHELLS.powershell || Object.values(SHELLS)[0];
-  s.proc = pty.spawn(sh.path, sh.args, {
+  const opts = {
     name: "xterm-256color", cols: s.cols || 120, rows: s.rows || 32, cwd: safeCwd(s.cwd),
     env: cleanEnv(),
-  });
+    // Windows 10's built-in ConPTY re-renders the console instead of passing
+    // VT through: it swallows alt-screen + mouse-tracking requests, so
+    // fullscreen TUIs (Claude Code) can't scroll and leave stale frames in
+    // the scrollback. node-pty ships a current conpty.dll/OpenConsole.exe.
+    useConptyDll: process.platform === "win32",
+  };
+  try { s.proc = pty.spawn(sh.path, sh.args, opts); }
+  catch (e) { if (!opts.useConptyDll) throw e; opts.useConptyDll = false; s.proc = pty.spawn(sh.path, sh.args, opts); }
   s.exited = false;
   s.modes = {};
   s.proc.onData((d) => {
