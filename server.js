@@ -911,7 +911,7 @@ const server = http.createServer((req, res) => {
       const st = fs.statSync(target);
       if (!st.isFile()) return jsonErr(res, 400, "not a file");
       if (url.searchParams.get("head") === "1") { // first 512 KB for text previews
-        res.writeHead(200, { "Content-Type": fileMime(target), "Content-Length": Math.min(st.size, 512 * 1024), "X-File-Size": st.size });
+        res.writeHead(200, { "Content-Type": fileMime(target), "Content-Length": Math.min(st.size, 512 * 1024), "X-File-Size": st.size, "X-File-Mtime": Math.floor(st.mtimeMs) });
         return fs.createReadStream(target, { end: 512 * 1024 - 1 }).pipe(res);
       }
       if (url.searchParams.get("dl") === "1") {
@@ -923,6 +923,31 @@ const server = http.createServer((req, res) => {
       }
       return sendFile(req, res, target, st);
     } catch (e) { return jsonErr(res, 403, e.code || "unreadable"); }
+  }
+  // save an existing text file from the editor: raw body, ?mtime= guards against
+  // overwriting a newer version on disk (409 unless &force=1)
+  if (url.pathname === "/api/file" && req.method === "PUT") {
+    const root = resolveBase(url.searchParams.get("base"));
+    if (!root) return jsonErr(res, 400, "bad base");
+    const target = jail(root, url.searchParams.get("path"));
+    if (!target) return jsonErr(res, 403, "outside jail");
+    let st;
+    try { st = fs.statSync(target); } catch (e) { return jsonErr(res, 404, e.code || "not found"); }
+    if (!st.isFile()) return jsonErr(res, 400, "not a file");
+    const want = Number(url.searchParams.get("mtime"));
+    if (want && Math.floor(st.mtimeMs) !== want && url.searchParams.get("force") !== "1")
+      return jsonErr(res, 409, "changed on disk");
+    const chunks = []; let size = 0;
+    req.on("data", (c) => { if ((size += c.length) > 8 * 1024 * 1024) { req.destroy(); return; } chunks.push(c); });
+    req.on("end", () => {
+      try {
+        fs.writeFileSync(target, Buffer.concat(chunks));
+        const nst = fs.statSync(target);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ size: nst.size, mtime: Math.floor(nst.mtimeMs) }));
+      } catch (e) { jsonErr(res, 403, e.code || "write failed"); }
+    });
+    return;
   }
   // path-style file access so an html preview resolves its relative css/js/img:
   //   /raw/<base>/<path>  e.g. /raw/@abs/C:/site/index.html, /raw/ws:<id>/docs/a.html

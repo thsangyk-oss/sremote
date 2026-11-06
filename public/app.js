@@ -362,7 +362,8 @@ window.addEventListener("popstate", () => {
   if (skipPop) { skipPop = false; return; }
   const open = [...document.querySelectorAll(".modal:not(.hidden), #palette:not(.hidden)")];
   if (open.length || !popMenu.classList.contains("hidden") || !pjPop.classList.contains("hidden")) {
-    for (const m of open) m.classList.add("hidden");
+    const keepFile = open.includes(fileModal) && !fileCanClose();
+    for (const m of open) if (!(keepFile && m === fileModal)) m.classList.add("hidden");
     hideMenu(); hidePjPop();
     if (view === "work") { try { history.pushState({ sr: "work" }, ""); } catch {} } // stay in the terminal
     return;
@@ -1787,7 +1788,9 @@ $("#scrim").onclick = () => {
 // ---------- keyboard shortcuts ----------
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
-    for (const m of ["#new-modal", "#picker", "#file-modal", "#snip-modal", "#copy-modal", "#settings-modal", "#palette", "#diff-modal", "#fx-modal"]) $(m)?.classList.add("hidden");
+    const keepFile = !fileModal.classList.contains("hidden") && !fileCanClose();
+    for (const m of ["#new-modal", "#picker", "#file-modal", "#snip-modal", "#copy-modal", "#settings-modal", "#palette", "#diff-modal", "#fx-modal"])
+      if (!(keepFile && m === "#file-modal")) $(m)?.classList.add("hidden");
     $("#fx-ctx")?.classList.add("hidden");
     hideMenu(); hidePjPop();
     closeTermSearch();
@@ -2190,7 +2193,8 @@ async function openFile(rel, it, base = fpRoot) {
   dl.download = it.name;
   const preEl = $("#file-body"), imgEl = $("#file-img"), mdEl = $("#file-body-html");
   stopFileMedia();
-  for (const el of [preEl, imgEl, mdEl, fileVideo, fileFrame, fileSrcBtn, fileOpen]) el.classList.add("hidden");
+  for (const el of [preEl, imgEl, mdEl, fileVideo, fileFrame, fileSrcBtn, fileOpen, fileEdit, fileModeBtn, fileSaveBtn, fileState]) el.classList.add("hidden");
+  fileEd = null;
   fileModal.classList.remove("hidden");
   const ext = (it.name.includes(".") ? it.name.split(".").pop() : "").toLowerCase();
   if (IMG_EXT.has(ext)) { imgEl.src = url; imgEl.alt = it.name; imgEl.classList.remove("hidden"); return; }
@@ -2226,32 +2230,107 @@ async function openFile(rel, it, base = fpRoot) {
     }
     return;
   }
-  if (ext === "md" || ext === "markdown") {
-    mdEl.innerHTML = "loading…"; mdEl.classList.remove("hidden");
-    try {
-      const r = await fetch(url + "&head=1");
-      mdEl.innerHTML = r.ok ? mdLite(await r.text()) : "Failed to load";
-    } catch (e) { mdEl.textContent = "Failed to load: " + e.message; }
-    return;
-  }
-  preEl.textContent = "loading…"; preEl.classList.remove("hidden");
+  const isMd = ext === "md" || ext === "markdown";
+  const target = isMd ? mdEl : preEl;
+  if (isMd) mdEl.innerHTML = "loading…"; else preEl.textContent = "loading…";
+  target.classList.remove("hidden");
   try {
     const r = await fetch(url + "&head=1");
+    if (!r.ok) throw new Error("HTTP " + r.status);
     const size = Number(r.headers.get("X-File-Size") || it.size);
-    const buf = await r.arrayBuffer();
-    const text = new TextDecoder("utf-8", { fatal: false }).decode(buf);
-    const printable = !/[\x00-\x08\x0E-\x1F]/.test(text.slice(0, 4000));
-    preEl.textContent = printable
-      ? text + (size > buf.byteLength ? `\n\n… truncated (${fmtSize(size)} total — use Download)` : "")
+    const buf = new Uint8Array(await r.arrayBuffer());
+    if (fileModal.classList.contains("hidden") || $("#file-name").textContent !== it.name) return; // closed / switched meanwhile
+    let text = null;
+    try { text = new TextDecoder("utf-8", { fatal: true }).decode(buf); } catch {}
+    const printable = text != null && !/[\x00-\x08\x0E-\x1F]/.test(text.slice(0, 4000));
+    if (printable && size <= buf.byteLength) { // whole file, valid UTF-8 → editable
+      fileEdOpen({ base, rel, text, isMd, mtime: Number(r.headers.get("X-File-Mtime")) || 0,
+        bom: buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF, crlf: /\r\n/.test(text) });
+      return;
+    }
+    if (isMd) { mdEl.innerHTML = text != null ? mdLite(text) : "Failed to decode"; return; } // >512 KB: read-only
+    const loose = new TextDecoder("utf-8", { fatal: false }).decode(buf);
+    preEl.textContent = !/[\x00-\x08\x0E-\x1F]/.test(loose.slice(0, 4000))
+      ? loose + (size > buf.byteLength ? `\n\n… truncated (${fmtSize(size)} total — read-only, use Download)` : "")
       : `Binary file — ${fmtSize(size)}. Use Download.`;
-  } catch (e) { preEl.textContent = "Failed to load: " + e.message; }
+  } catch (e) { target.textContent = "Failed to load: " + e.message; }
 }
-$("#file-close").onclick = () => fileModal.classList.add("hidden");
+// ---------- text editor inside the file modal (any whole, valid UTF-8 text file) ----------
+const fileEdit = $("#file-edit"), fileModeBtn = $("#file-mode"), fileSaveBtn = $("#file-save"), fileState = $("#file-state");
+let fileEd = null; // {base, rel, orig, isMd, mtime, bom, crlf, saving}
+function fileEdOpen(o) {
+  const text = o.crlf ? o.text.replace(/\r\n/g, "\n") : o.text; // textarea normalizes to \n; restored on save
+  fileEd = { ...o, orig: text, saving: false };
+  fileEdit.value = text;
+  fileSaveBtn.classList.remove("hidden"); fileState.classList.remove("hidden");
+  fileEdDirty();
+  if (o.isMd) { fileModeBtn.classList.remove("hidden"); fileEdMode(false); } // md opens rendered
+  else { $("#file-body").classList.add("hidden"); fileEdit.classList.remove("hidden"); if (!isCoarse) fileEdit.focus(); }
+}
+function fileEdIsDirty() { return !!fileEd && fileEdit.value !== fileEd.orig; }
+function fileEdDirty() {
+  if (!fileEd) return;
+  const d = fileEdIsDirty();
+  fileSaveBtn.disabled = !d || fileEd.saving;
+  fileState.textContent = fileEd.saving ? "saving…" : d ? "● modified" : "";
+  fileState.classList.toggle("dirty", d);
+}
+// md: Code = textarea, View = rendered from the current (possibly unsaved) text
+function fileEdMode(code) {
+  const mdEl = $("#file-body-html");
+  fileEdit.classList.toggle("hidden", !code);
+  mdEl.classList.toggle("hidden", code);
+  fileModeBtn.textContent = code ? "View" : "Code";
+  if (code) { if (!isCoarse) fileEdit.focus(); } else mdEl.innerHTML = mdLite(fileEdit.value);
+}
+async function fileEdSave(force = false) {
+  const ed = fileEd;
+  if (!ed || ed.saving || !fileEdIsDirty()) return;
+  const value = fileEdit.value;
+  const body = new TextEncoder().encode((ed.bom ? "\uFEFF" : "") + (ed.crlf ? value.replace(/\n/g, "\r\n") : value));
+  ed.saving = true; fileEdDirty();
+  try {
+    const q = `/api/file?base=${encodeURIComponent(ed.base)}&path=${encodeURIComponent(ed.rel)}&mtime=${ed.mtime}${force ? "&force=1" : ""}`;
+    const r = await fetch(q, { method: "PUT", body });
+    const j = await r.json().catch(() => ({}));
+    ed.saving = false;
+    if (r.status === 409) {
+      fileEdDirty();
+      if (confirm("File changed on disk since it was opened. Overwrite it?")) return fileEdSave(true);
+      return;
+    }
+    if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+    ed.orig = value; ed.mtime = j.mtime || 0;
+    fileEdDirty();
+    toast("Saved " + $("#file-name").textContent);
+  } catch (e) {
+    ed.saving = false; fileEdDirty();
+    toast("Save failed: " + e.message, "err");
+  }
+}
+// every close path (×, backdrop, Esc, Back) asks first when there are unsaved edits
+function fileCanClose() { return !fileEdIsDirty() || confirm("Discard unsaved changes?"); }
+fileEdit.addEventListener("input", fileEdDirty);
+fileEdit.addEventListener("keydown", (e) => {
+  if (e.key === "Tab" && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) {
+    e.preventDefault(); // insert a tab instead of leaving the editor (execCommand keeps undo)
+    if (!document.execCommand("insertText", false, "\t")) fileEdit.setRangeText("\t", fileEdit.selectionStart, fileEdit.selectionEnd, "end");
+    fileEdDirty();
+  }
+});
+fileModal.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && (e.key === "s" || e.key === "S") && fileEd) {
+    e.preventDefault(); e.stopPropagation(); fileEdSave();
+  }
+});
+fileSaveBtn.onclick = () => fileEdSave();
+fileModeBtn.onclick = () => fileEdMode(fileEdit.classList.contains("hidden"));
+$("#file-close").onclick = () => { if (fileCanClose()) fileModal.classList.add("hidden"); };
 fileSrcBtn.onclick = () => fileSrcShow && fileSrcShow();
 // every close path (×, backdrop, Esc, Back) just hides the modal — stop playback there
-new MutationObserver(() => { if (fileModal.classList.contains("hidden")) stopFileMedia(); })
+new MutationObserver(() => { if (fileModal.classList.contains("hidden")) { stopFileMedia(); fileEd = null; } })
   .observe(fileModal, { attributes: true, attributeFilter: ["class"] });
-fileModal.onclick = (e) => { if (e.target === fileModal) fileModal.classList.add("hidden"); };
+fileModal.onclick = (e) => { if (e.target === fileModal && fileCanClose()) fileModal.classList.add("hidden"); };
 
 // ---------- git diff viewer ----------
 const diffModal = $("#diff-modal");

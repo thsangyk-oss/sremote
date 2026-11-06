@@ -12,7 +12,7 @@
 <meta name="theme-color" content="#070a10">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="stylesheet" href="/vendor/xterm.css">
-<link rel="stylesheet" href="/style.css?v=30">
+<link rel="stylesheet" href="/style.css?v=31">
 </head>
 <body>
 
@@ -248,12 +248,16 @@
   <div class="file-card">
     <div class="file-head">
       <span id="file-name"></span>
+      <span id="file-state" class="hidden"></span>
+      <button id="file-mode" class="mini-btn hidden" title="Toggle code / rendered view">Code</button>
+      <button id="file-save" class="mini-btn hidden" title="Save (Ctrl+S)" disabled>Save</button>
       <button id="file-src" class="mini-btn hidden" title="Toggle rendered / source">Source</button>
       <a id="file-open" class="mini-btn hidden" target="_blank" rel="noopener" title="Open in a new tab">Open ↗</a>
       <a id="file-dl" class="mini-btn" download>Download</a>
       <button id="file-close" class="mini-btn">×</button>
     </div>
     <pre id="file-body"></pre>
+    <textarea id="file-edit" class="hidden" spellcheck="false" autocomplete="off" autocapitalize="off" wrap="off"></textarea>
     <img id="file-img" class="hidden" alt="">
     <div id="file-body-html" class="md hidden"></div>
     <video id="file-video" class="hidden" controls playsinline preload="metadata"></video>
@@ -343,6 +347,6 @@
 <script src="/vendor/addon-search.js"></script>
 <script src="/vendor/addon-web-links.js"></script>
 <script src="/vendor/addon-unicode11.js"></script>
-<script src="/app.js?v=55"></script>
+<script src="/app.js?v=56"></script>
 </body>
 </html>
