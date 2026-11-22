@@ -1506,7 +1506,7 @@ function histRecall(dir) { // dir -1 = older (ArrowUp), +1 = newer/draft (ArrowD
   const c = dir === -1 ? 0 : typer.value.length; // park caret on the recall edge so nav continues on multi-line entries
   typer.selectionStart = typer.selectionEnd = c;
 }
-function typerSend(withEnter) {
+function typerSend(withEnter, refocus = true) {
   const v = typer.value;
   if (!activeId) return;
   const p = panes.get(activeId);
@@ -1518,11 +1518,103 @@ function typerSend(withEnter) {
   histPush(v);
   typer.value = "";
   typerGrow();
-  typer.focus();
+  if (refocus) typer.focus();
 }
 $("#typer-send").onclick = () => typerSend(true);
 typer.addEventListener("input", typerGrow);
+
+// history popover — the touch answer to ArrowUp: tap 🕘 (or Ctrl+R) → pick / send / delete; filters by what's typed
+const histPop = $("#hist-pop"), histListEl = $("#hist-list"), histBtn = $("#typer-hist");
+const hp = { q: "", sel: -1, rows: [] }; // rows: indices into typerHist.list, newest first
+const histOpen = () => !histPop.classList.contains("hidden");
+function histRender() {
+  const q = hp.q.toLowerCase();
+  hp.rows = [];
+  for (let i = typerHist.list.length - 1; i >= 0; i--) {
+    const s = typerHist.list[i];
+    if (!q || s.toLowerCase().includes(q)) hp.rows.push(i);
+  }
+  if (hp.sel >= hp.rows.length) hp.sel = hp.rows.length - 1;
+  histListEl.innerHTML = "";
+  if (!hp.rows.length) histListEl.innerHTML = `<div class="hist-none">${typerHist.list.length ? "No match for “" + esc(hp.q) + "”" : "No history yet — sent commands show up here."}</div>`;
+  hp.rows.forEach((li, r) => {
+    const s = typerHist.list[li];
+    const d = document.createElement("div");
+    d.className = "hist-item" + (r === hp.sel ? " sel" : "");
+    let html = esc(s.replace(/\n/g, " ⏎ "));
+    if (q) { const at = s.replace(/\n/g, " ⏎ ").toLowerCase().indexOf(q); if (at >= 0) { const t = s.replace(/\n/g, " ⏎ "); html = esc(t.slice(0, at)) + "<mark>" + esc(t.slice(at, at + q.length)) + "</mark>" + esc(t.slice(at + q.length)); } }
+    d.innerHTML = `<span class="hist-txt" title="Edit">${html}</span><button class="hist-act" data-h="send" title="Send now">⏎</button><button class="hist-act x" data-h="del" title="Delete">×</button>`;
+    d.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const a = e.target.closest("[data-h]")?.dataset.h;
+      if (a === "del") {
+        typerHist.list.splice(li, 1);
+        try { localStorage.setItem("rd.typer.hist", JSON.stringify(typerHist.list)); } catch {}
+        typerHist.i = -1; histRender();
+      } else histPick(li, a === "send");
+    });
+    histListEl.appendChild(d);
+  });
+  histListEl.querySelector(".sel")?.scrollIntoView({ block: "nearest" });
+}
+function histShow() {
+  typerMenu.classList.add("hidden");
+  hp.q = typer.value.includes("\n") ? "" : typer.value.trim(); hp.sel = -1;
+  $("#hist-hint").textContent = document.body.classList.contains("touch-ui")
+    ? "Tip: swipe ↑ / ↓ on the input to step through history"
+    : "↑↓ select · Enter fill · Shift+Enter send · Esc close";
+  histPop.classList.remove("hidden"); histBtn.classList.add("on");
+  histRender();
+  histListEl.scrollTop = histListEl.scrollHeight; // column-reverse: newest at the bottom, next to the input
+}
+function histHide() { histPop.classList.add("hidden"); histBtn.classList.remove("on"); }
+function histPick(li, sendNow) {
+  const s = typerHist.list[li];
+  if (s == null) return;
+  histHide();
+  typer.value = s; typerHist.i = -1; typerGrow();
+  if (sendNow) { typerSend(true, !document.body.classList.contains("touch-ui")); return; }
+  typer.focus(); typer.selectionStart = typer.selectionEnd = s.length;
+}
+histBtn.addEventListener("click", (e) => { e.stopPropagation(); reqNotifPerm(); histOpen() ? histHide() : histShow(); });
+histPop.addEventListener("click", (e) => e.stopPropagation());
+$("#hist-clear").addEventListener("click", () => {
+  if (!typerHist.list.length || !confirm("Clear all input history?")) return;
+  typerHist.list = []; typerHist.i = -1;
+  try { localStorage.removeItem("rd.typer.hist"); } catch {}
+  histRender();
+});
+document.addEventListener("click", (e) => { if (histOpen() && !histPop.contains(e.target)) histHide(); });
+typer.addEventListener("input", () => { if (histOpen()) { hp.q = typer.value.trim(); hp.sel = -1; histRender(); } });
+
+// swipe ↑/↓ on the input = ArrowUp/ArrowDown recall (only when the textarea has nothing to scroll)
+let tySw = null;
+typer.addEventListener("touchstart", (e) => {
+  const t = e.touches[0];
+  tySw = e.touches.length === 1 && typer.scrollHeight <= typer.clientHeight + 2 ? { x: t.clientX, y: t.clientY } : null;
+}, { passive: true });
+typer.addEventListener("touchend", (e) => {
+  if (!tySw) return;
+  const t = e.changedTouches[0], dx = t.clientX - tySw.x, dy = t.clientY - tySw.y;
+  tySw = null;
+  if (Math.abs(dy) < 28 || Math.abs(dy) < Math.abs(dx) * 1.5) return;
+  if (e.cancelable) e.preventDefault(); // don't let the swipe also place the caret / pop the keyboard
+  histRecall(dy < 0 ? -1 : 1);
+  if (navigator.vibrate) try { navigator.vibrate(8); } catch {}
+});
+
 typer.addEventListener("keydown", (e) => {
+  if (e.key === "r" && e.ctrlKey && !e.altKey && !e.metaKey) { e.preventDefault(); histOpen() ? histHide() : histShow(); e.stopPropagation(); return; }
+  if (histOpen() && !e.isComposing) {
+    if (e.key === "Escape") { e.preventDefault(); histHide(); e.stopPropagation(); return; }
+    if (e.key === "ArrowUp" || e.key === "ArrowDown") { // list is visually bottom-up: Up = older
+      e.preventDefault(); e.stopPropagation();
+      if (hp.rows.length) { hp.sel = e.key === "ArrowUp" ? Math.min(hp.sel + 1, hp.rows.length - 1) : Math.max(hp.sel - 1, 0); histRender(); }
+      return;
+    }
+    if (e.key === "Enter" && hp.sel >= 0) { e.preventDefault(); e.stopPropagation(); histPick(hp.rows[hp.sel], e.shiftKey); return; }
+    if (e.key === "Enter") histHide(); // no selection → normal send of what's typed
+  }
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); typerSend(true); } // Shift+Enter = literal newline
   else if (e.key === "ArrowUp" && typer.value.slice(0, typer.selectionStart).indexOf("\n") === -1) { e.preventDefault(); histRecall(-1); }
   else if (e.key === "ArrowDown" && typer.value.slice(typer.selectionEnd).indexOf("\n") === -1) { e.preventDefault(); histRecall(1); }
@@ -1568,7 +1660,7 @@ async function uploadFiles(files, dir = "temp-upload") { // sequential
 }
 // typerow "＋" menu → attach / camera / snippets / raw-insert
 const typerMenu = $("#typer-menu");
-$("#typer-more").onclick = (e) => { e.stopPropagation(); typerMenu.classList.toggle("hidden"); };
+$("#typer-more").onclick = (e) => { e.stopPropagation(); histHide(); typerMenu.classList.toggle("hidden"); };
 document.addEventListener("click", (e) => {
   if (!typerMenu.classList.contains("hidden") && !typerMenu.contains(e.target) && e.target.id !== "typer-more" && !e.target.closest("#typer-more"))
     typerMenu.classList.add("hidden");
