@@ -233,6 +233,8 @@ function connect() {
         if (p) {
           p.term.write(m.data);
           p.lastOutAt = Date.now(); p.idleNotified = false; // reset busy→quiet edge
+          if (p.claude) claudeOut(m.id, p);
+          if (clAutoRun.has(m.id)) claudeAutoOut(m.id);
           if (onScreen(m.id) && document.visibilityState === "visible") { seen[m.id] = Date.now(); saveSeen(); }
           if (!onScreen(m.id)) {
             unreadSess.add(m.id);
@@ -258,6 +260,7 @@ function connect() {
         // tag the new session into the current workspace client-side happens server-side
         if (wantSplitForNew) { wantSplitForNew = false; splitWith(m.id); }
         else select(m.id);
+        claudeCreated(m.id);
         break;
       }
       case "activity": { // {id: lastOut} for all sessions, coalesced server-side
@@ -627,7 +630,7 @@ function ensurePane(id) {
     send({ type: "in", id, data: d, rep: rep || undefined });
   });
   term.onResize(({ cols, rows }) => send({ type: "resize", id, cols, rows }));
-  term.onTitleChange((t) => { p.title = t; renderTabs(); });
+  term.onTitleChange((t) => { p.title = t; claudeTitle(id, p, t); renderTabs(); });
   term.attachCustomKeyEventHandler((e) => {
     if (e.type === "keydown" && e.shiftKey && e.key === "Enter") { send({ type: "in", id, data: "\x1b\r" }); return false; } // Shift+Enter → Alt+Enter (Devin newline)
     if (e.type === "keydown" && e.ctrlKey && e.shiftKey && e.key === "V") { navigator.clipboard.readText().then((t) => send({ type: "in", id, data: t })); return false; }
@@ -942,7 +945,7 @@ function renderTabs() {
     const ttl = (p.title || "").slice(0, 24);
     const gw = guest ? wsById(sessWs(s)) : null;
     const t = document.createElement("div");
-    t.className = "tab" + (guest ? " guest" : "") + (s.id === activeId ? " active" : "") + (s.exited ? " exited" : "") + (notifiedSess.has(s.id) ? " bell" : "") + (unreadSess.has(s.id) ? " unread" : "");
+    t.className = "tab" + (guest ? " guest" : "") + (s.id === activeId ? " active" : "") + (s.exited ? " exited" : "") + (notifiedSess.has(s.id) ? " bell" : "") + (unreadSess.has(s.id) ? " unread" : "") + (p.claude && p.claude.on ? " claude" + (p.claude.busy ? " cl-busy" : "") : "");
     t.dataset.id = s.id;
     t.title = (p.title || s.name) + (guest ? ` — ${gw ? gw.name : "Standalone"} (split)` : "");
     t.innerHTML = `<span>${esc(s.name)}</span>${guest ? `<span class="tab-ws">${esc(gw ? gw.name : "Standalone")}</span>` : ""}${ttl ? `<span class="tab-ttl">${esc(ttl)}</span>` : ""}<span class="tab-x" title="kill">×</span>`;
@@ -954,6 +957,7 @@ function renderTabs() {
   // split partner living in another project gets a guest tab — click focuses it
   const g = splitId && sessions.find((x) => x.id === splitId);
   if (g && !inView(g.id)) mk(g, true);
+  try { claudeSync(); } catch {} // focused session changed or its title moved → Claude bar follows
 }
 
 // ---------- home: search + continue + compact project list ----------
@@ -1027,7 +1031,7 @@ function renderHome() {
     d.onclick = (e) => {
       const chip = e.target.closest("[data-sid]");
       if (chip) return openSession(chip.dataset.sid);
-      if (e.target.closest(".sc-new")) return quickNew(p.w ? p.w.id : null);
+      if (e.target.closest(".sc-new")) return openModal(p.w ? p.w.id : null); // terminal / Claude / Devin chosen in the dialog
       if (e.target.closest(".pj-pin")) {
         const s = pinsLoad(); if (s.has(p.key)) s.delete(p.key); else s.add(p.key);
         pinsSave(s); renderHome(); return;
@@ -1544,8 +1548,15 @@ function sendKey(def) {
   if (modsOn()) { modSend(def.d); return; }
   send({ type: "in", id: activeId, data: def.d });
 }
+function modTap(mod) { // off → once → locked → off
+  mods[mod] = (mods[mod] + 1) % 3;
+  syncLatch();
+  // keyboard hidden (nothing typable focused) → bring it up so a letter can follow
+  const ae = document.activeElement;
+  if (mods[mod] && !(ae && (ae.tagName === "TEXTAREA" || ae.tagName === "INPUT"))) $("#typer")?.focus();
+}
 function syncLatch() {
-  document.querySelectorAll("#keybar .kb-mod").forEach((b) => {
+  document.querySelectorAll(".kb-mod[data-mod]").forEach((b) => {
     const v = mods[b.dataset.mod] || 0;
     b.classList.toggle("latched", v === 1);
     b.classList.toggle("locked", v === 2);
@@ -1575,11 +1586,7 @@ function rebuildKeybar() { // global — settings UI calls this after editing rd
     b.addEventListener("click", () => {
       reqNotifPerm();
       if (k.mod) {
-        mods[k.mod] = (mods[k.mod] + 1) % 3;
-        syncLatch();
-        // keyboard hidden (nothing typable focused) → bring it up so a letter can follow
-        const ae = document.activeElement;
-        if (mods[k.mod] && !(ae && (ae.tagName === "TEXTAREA" || ae.tagName === "INPUT"))) $("#typer")?.focus();
+        modTap(k.mod);
         return;
       }
       const ae = document.activeElement;
@@ -1772,6 +1779,255 @@ typer.addEventListener("keydown", (e) => {
 });
 $("#typerow").addEventListener("click", reqNotifPerm); // lazy Notification permission ask on user tap
 
+// ---------- AI agent mode (Claude Code / Devin) ----------
+// Both CLIs title the terminal, which is the detector — no server support needed:
+//   Claude Code: "<glyph> <task>" — ◐/◑ spinner while working, ✳ when it waits for you
+//   Devin:       "devin(.exe): <task>" — busy/idle read from the screen ("esc twice to interrupt")
+// Exit: titles stay stale after quitting, so a shell prompt back on the cursor line switches the
+// mode off until the title changes again.
+const CL_TITLE = /^([✳◐◑◒◓✶✻✽✢·])\s+(.*)$/;
+const DV_TITLE = /^devin(?:\.exe)?(?::\s*(.*))?$/i;
+const CL_PROMPT = [/^PS [^>]*>\s*$/, /^[A-Za-z]:\\[^>]*>\s*$/, /^[\w.-]+@[\w.-]+(:\S*)?\s*[$#%]\s*$/, /^\S*[~\/]\S*\s?[$#]\s*$/];
+const AG = {
+  claude: {
+    name: "Claude Code", glyph: "✳",
+    keys: { stop: "\x1b", mode: "\x1b[Z", rewind: "\x1b\x1b", details: "\x0f", todos: "\x14" },
+    cmds: [
+      ["/clear", "Start a fresh conversation"], ["/compact", "Summarize to free up context"],
+      ["/model", "Switch model"], ["/resume", "Resume a past conversation"],
+      ["/context", "Show context window usage"], ["/rewind", "Rewind conversation / code"],
+      ["/review", "Review a pull request"], ["/init", "Create CLAUDE.md for this project"],
+      ["/memory", "Edit memory (CLAUDE.md) files"], ["/permissions", "Allow / deny tool rules"],
+      ["/config", "Settings"], ["/mcp", "MCP servers"], ["/agents", "Subagents"],
+      ["/status", "Version, model, account"], ["/cost", "Token usage of this session"],
+      ["/export", "Export the conversation"], ["/doctor", "Check the installation"],
+      ["/help", "All commands"], ["/exit", "Quit Claude Code"],
+    ],
+    projDir: ".claude/commands",
+  },
+  devin: {
+    name: "Devin", glyph: "◆",
+    keys: { stop: "\x1b\x1b", mode: "\x1b[Z", details: "\x0f", redraw: "\x0c" },
+    cmds: [
+      ["/clear", "Clear conversation history"], ["/resume", "Resume a previous session"],
+      ["/recap", "Recap the session so far"], ["/context", "Show context window usage"],
+      ["/usage", "Session usage of credits / ACUs"], ["/session-stats", "Session statistics"],
+      ["/accept-edits", "Switch to accept-edits mode"], ["/autonomous", "Switch to autonomous mode"],
+      ["/bypass", "Switch to bypass mode"], ["/cloud", "Move this session to Devin cloud"],
+      ["/upload-secrets", "Securely upload local secrets"], ["/login-status", "Login / auth status"],
+      ["/bug", "Report a bug"], ["/logout", "Clear credentials and exit"],
+    ],
+    projDir: null,
+  },
+};
+const clState = (p) => p.claude || (p.claude = { on: false, kind: "claude", busy: false, task: "", ask: false, offTitle: null, hidden: false });
+const cbar = $("#claudebar"), ccmds = $("#claude-cmds");
+
+function claudeTitle(id, p, t) {
+  const c = clState(p), cm = CL_TITLE.exec(t || ""), dm = !cm && DV_TITLE.exec(t || "");
+  if (!cm && !dm) { if (c.on && t) { c.on = false; c.busy = false; } claudeSync(); return; } // another program took the title
+  if (c.offTitle === t) return; // stale title from an agent that already exited
+  c.offTitle = null;
+  if (cm) {
+    const wasBusy = c.on && c.kind === "claude" && c.busy;
+    c.on = true; c.kind = "claude"; c.busy = cm[1] !== "✳"; c.task = cm[2];
+    if (wasBusy && !c.busy && !(p.replayUntil > Date.now())) notifySession(id, "claude");
+  } else {
+    if (!(c.on && c.kind === "devin")) c.busy = false;
+    c.on = true; c.kind = "devin"; c.task = (dm[1] || "").trim();
+    claudeOut(id, p);
+  }
+  claudeSync();
+}
+function claudeOut(id, p) { // throttled screen scan: permission prompt / busy (Devin) / back at the shell
+  const c = p.claude;
+  if (!c || !c.on || c.scanT) return;
+  c.scanT = setTimeout(() => { c.scanT = 0; claudeScan(id, p); }, 250);
+}
+function claudeScan(id, p) {
+  const c = p.claude, b = p.term.buffer.active;
+  if (!c || !c.on) return;
+  const lines = [];
+  for (let y = Math.max(0, b.baseY + b.cursorY - 24); y <= b.baseY + b.cursorY + 2 && y < b.length; y++) {
+    const l = b.getLine(y); if (l) lines.push(l.translateToString(true));
+  }
+  const txt = lines.join("\n");
+  const cur = (b.getLine(b.baseY + b.cursorY)?.translateToString(true) || "").trimEnd();
+  if (cur && CL_PROMPT.some((r) => r.test(cur))) { c.on = false; c.ask = false; c.offTitle = p.title; } // agent exited → shell prompt
+  else {
+    c.ask = /(Do you want|Would you like|want to proceed|Allow )[^\n]*\?/i.test(txt) && /^\s*[❯>›]?\s*1\.\s+\S/m.test(txt);
+    if (c.kind === "devin") {
+      const wasBusy = c.busy;
+      c.busy = /esc (twice|again) to interrupt|esc to interrupt/i.test(txt);
+      if (wasBusy && !c.busy && !(p.replayUntil > Date.now())) notifySession(id, "claude");
+    }
+  }
+  if (id === activeId) claudeSync();
+}
+setInterval(() => { const p = panes.get(activeId); if (p && p.claude && p.claude.on) claudeScan(activeId, p); }, 2500);
+
+function claudeSync() {
+  if (!cbar) return;
+  const p = activeId && panes.get(activeId), c = p && p.claude;
+  const on = !!(c && c.on && !c.hidden && view === "work");
+  cbar.classList.toggle("hidden", !on);
+  document.body.classList.toggle("claude-on", on);
+  if (!on) { ccmds.classList.add("hidden"); if (cbMore) cbMore.classList.add("hidden"); typer.placeholder = typer.dataset.ph || typer.placeholder; return; }
+  const ag = AG[c.kind];
+  cbar.classList.toggle("k-claude", c.kind === "claude");
+  cbar.classList.toggle("k-devin", c.kind === "devin");
+  cbar.classList.toggle("busy", c.busy);
+  cbar.classList.toggle("ask", c.ask);
+  $("#cb-glyph").textContent = ag.glyph;
+  $("#cb-state").textContent = c.ask ? "needs your answer" : c.busy ? "working…" : "waiting for you";
+  $("#cb-task").textContent = c.task || ag.name;
+  if (!modsOn()) typer.placeholder = `Message ${ag.name === "Claude Code" ? "Claude" : ag.name}${c.busy ? " (queued while it works)" : ""}…`;
+}
+function claudeKey(data) {
+  if (!activeId || !data) return;
+  send({ type: "in", id: activeId, data });
+  const p = panes.get(activeId); if (p) setTimeout(() => claudeScan(activeId, p), 400);
+}
+function typerInsert(s, atStart) {
+  const v = typer.value;
+  if (atStart) typer.value = s + v.replace(/^!\s*/, "");
+  else typer.value = v && !/\s$/.test(v) ? `${v} ${s}` : v + s;
+  typerGrow(); typer.focus();
+  typer.selectionStart = typer.selectionEnd = typer.value.length;
+}
+if (cbar) cbar.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-c]");
+  if (!b) return;
+  e.stopPropagation(); reqNotifPerm();
+  const a = b.dataset.c, p = panes.get(activeId), c = p && p.claude, ag = AG[(c && c.kind) || "claude"];
+  if (a === "keys") { ccmds.classList.add("hidden"); if (cbMore.classList.contains("hidden")) { cbMoreBuild(); cbMore.classList.remove("hidden"); } else cbMore.classList.add("hidden"); return; }
+  cbMore.classList.add("hidden");
+  if (a === "cmds") return ccmds.classList.contains("hidden") ? claudeCmdsShow() : ccmds.classList.add("hidden");
+  ccmds.classList.add("hidden");
+  if (a === "xs") return claudeKey("\x18\x13"); // Ctrl+X Ctrl+S
+  if (ag.keys[a]) claudeKey(ag.keys[a]);
+  else if (a === "enter") claudeKey("\r");
+  else if (a === "up") claudeKey("\x1b[A");
+  else if (a === "down") claudeKey("\x1b[B");
+  else if (/^[1-3]$/.test(a)) claudeKey(a);
+  else if (a === "at") typerInsert("@");
+  else if (a === "bash") typerInsert("! ", true);
+  else if (a === "hide") { if (c) c.hidden = true; claudeSync(); toast(`${ag.name} bar hidden for this terminal`); }
+});
+
+// "more keys" sheet: everything the key row offers, so the row can stay hidden in agent mode
+const cbMore = $("#cb-more");
+const CB_MORE = ["esc", "tab", { id: "btab", l: "⇧Tab", d: "\x1b[Z" }, "ctrl", "alt", "shift",
+  "left", "up", "down", "right", "home", "end", "pgup", "pgdn", "del",
+  "c-c", "c-d", "c-l", { id: "c-r", l: "C-r", d: "\x12" }, "c-u", "c-k", "c-w", "c-z",
+  { id: "c-xs", l: "C-x C-s", d: "\x18\x13" }, "pipe", "tilde", "slash", "dash"];
+const kbKeep = () => { try { return localStorage.getItem("rd.agent.keybar") === "1"; } catch { return false; } };
+function cbMoreBuild() {
+  cbMore.innerHTML = "";
+  const byId = {}; for (const k of KB_KEYS) byId[k.id] = k;
+  const grid = document.createElement("div"); grid.className = "cbm-grid";
+  for (const it of CB_MORE) {
+    const k = typeof it === "string" ? byId[it] : it;
+    if (!k) continue;
+    const b = document.createElement("button");
+    b.className = "kb-key" + (k.mod ? " kb-mod" : "");
+    b.textContent = k.l;
+    if (k.mod) { b.dataset.mod = k.mod; b.addEventListener("pointerdown", (e) => e.preventDefault()); }
+    b.addEventListener("click", (e) => { e.stopPropagation(); if (k.mod) modTap(k.mod); else sendKey(k); });
+    grid.appendChild(b);
+  }
+  cbMore.appendChild(grid);
+  const t = document.createElement("label"); t.className = "cbm-keep";
+  t.innerHTML = `<input type="checkbox"${kbKeep() ? " checked" : ""}> Keep the key row visible in Claude / Devin`;
+  t.querySelector("input").addEventListener("change", (e) => {
+    try { localStorage.setItem("rd.agent.keybar", e.target.checked ? "1" : "0"); } catch {}
+    document.body.classList.toggle("kb-keep", e.target.checked);
+  });
+  t.addEventListener("click", (e) => e.stopPropagation());
+  cbMore.appendChild(t);
+  syncLatch();
+}
+document.body.classList.toggle("kb-keep", kbKeep());
+document.addEventListener("click", (e) => { if (cbMore && !cbMore.classList.contains("hidden") && !cbMore.contains(e.target) && !e.target.closest("[data-c=keys]")) cbMore.classList.add("hidden"); });
+
+// slash-command picker: recent ones you sent, this project's commands (Claude), then built-ins
+async function claudeCmdsShow() {
+  histHide(); typerMenu.classList.add("hidden");
+  const p = panes.get(activeId), ag = AG[(p && p.claude && p.claude.kind) || "claude"];
+  const list = $("#cc-list");
+  const known = new Set(ag.cmds.map((x) => x[0]));
+  const recent = [...new Set(typerHist.list.filter((s) => /^\/[\w:-]+/.test(s)).reverse())].slice(0, 6);
+  const row = (cmd, desc, tag) => `<div class="cc-item" data-cmd="${esc(cmd)}"><span class="cc-txt"><b>${esc(cmd)}</b>${desc ? `<small>${esc(desc)}</small>` : ""}</span>${tag ? `<span class="cc-tag">${esc(tag)}</span>` : ""}<button class="hist-act" data-e="1" title="Edit before sending">✎</button><button class="hist-act" title="Send now">⏎</button></div>`;
+  const render = (proj) => {
+    list.innerHTML =
+      (recent.length ? `<div class="cc-h">Recent</div>` + recent.map((s) => row(s, ag.cmds.find((x) => x[0] === s)?.[1] || "", "")).join("") : "") +
+      (proj.length ? `<div class="cc-h">This project</div>` + proj.filter((n) => !known.has("/" + n)).map((n) => row("/" + n, "", "project")).join("") : "") +
+      `<div class="cc-h">${esc(ag.name)}</div>` + ag.cmds.map(([c, d]) => row(c, d, "")).join("");
+  };
+  render([]);
+  ccmds.classList.remove("hidden");
+  const s = sessions.find((x) => x.id === activeId);
+  const base = currentWs ? `ws:${currentWs}` : s && s.cwd;
+  if (!base || !ag.projDir) return;
+  const j = await fetch(`/api/files?base=${encodeURIComponent(base)}&path=${encodeURIComponent(ag.projDir)}`).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  const proj = ((j && j.items) || []).filter((i) => !i.dir && /\.md$/i.test(i.name)).map((i) => i.name.replace(/\.md$/i, ""));
+  if (proj.length && !ccmds.classList.contains("hidden")) render(proj);
+}
+if (ccmds) {
+  ccmds.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const it = e.target.closest("[data-cmd]");
+    if (!it) return;
+    const cmd = it.dataset.cmd;
+    ccmds.classList.add("hidden");
+    if (e.target.closest("[data-e]")) { typer.value = cmd + " "; typerHist.i = -1; typerGrow(); typer.focus(); typer.selectionStart = typer.selectionEnd = typer.value.length; return; }
+    if (!activeId) return;
+    send({ type: "in", id: activeId, data: cmd + "\r" });
+    histPush(cmd);
+  });
+  document.addEventListener("click", (e) => { if (!ccmds.classList.contains("hidden") && !ccmds.contains(e.target) && !e.target.closest("#claudebar")) ccmds.classList.add("hidden"); });
+}
+
+// "Claude" / "Devin" buttons: new terminal in the project, then run the CLI once the shell has drawn its prompt
+const AGENT_CLI = {
+  claude: { cmd: "claude", label: "Claude Code" },
+  devin: { cmd: "devin", label: "Devin" },
+};
+const agentCmd = (k) => { try { return localStorage.getItem(`rd.${k}.cmd`) || AGENT_CLI[k].cmd; } catch { return AGENT_CLI[k].cmd; } };
+let clLaunch = null; // {kind, at} — the next "created" session runs this agent
+const clAutoRun = new Map(); // session id -> {kind, t: timer, until}
+function launchAgent(kind, wsId, opts) {
+  clLaunch = { kind, at: Date.now() };
+  if (opts) { send({ type: "create", cols: 120, rows: 32, ...opts }); return; }
+  if (view === "work" && splitId) { newForSplit(wsId ? wsById(wsId) : null); return; }
+  if (view !== "work" || (currentWs ?? null) !== wsId) enterWorkspace(wsId);
+  const shell = localStorage.getItem("rd.shell") || (hostInfo.shells || ["powershell"])[0];
+  send({ type: "create", shell, cols: 120, rows: 32, name: kind, ...(wsId ? { workspace: wsId } : { cwd: hostInfo.home }) });
+}
+const launchClaude = (wsId, opts) => launchAgent("claude", wsId, opts);
+function claudeCreated(id) {
+  if (!clLaunch || Date.now() - clLaunch.at > 8000) return;
+  const a = { kind: clLaunch.kind, until: Date.now() + 8000, t: 0 };
+  clLaunch = null;
+  clAutoRun.set(id, a);
+  a.t = setTimeout(() => claudeRun(id), 2500); // no output at all → go anyway
+}
+function claudeAutoOut(id) { // shell is printing its banner/prompt — fire 600ms after it goes quiet
+  const a = clAutoRun.get(id);
+  if (!a) return;
+  clearTimeout(a.t);
+  a.t = setTimeout(() => claudeRun(id), Date.now() > a.until ? 0 : 600);
+}
+function claudeRun(id) {
+  const a = clAutoRun.get(id);
+  if (!a) return;
+  clearTimeout(a.t); clAutoRun.delete(id);
+  send({ type: "in", id, data: agentCmd(a.kind) + "\r" });
+  const p = panes.get(id);
+  if (p) { const c = clState(p); c.on = true; c.kind = a.kind; c.busy = false; c.task = `starting ${AG[a.kind].name}…`; c.offTitle = null; c.hidden = false; }
+  if (id === activeId) claudeSync();
+}
+
 // ---------- upload (attach / camera / paste / drop → temp-upload) ----------
 function typerProg(frac) {
   if (!typerProgEl) return;
@@ -1908,7 +2164,8 @@ function notifySession(id, reason) {
   if (t) t.classList.add("bell");
   setTitle(); refreshStates();
   const sess = sessions.find((s) => s.id === id);
-  const body = reason === "bell" ? "Process signaled attention" : "Session idle after output";
+  const pc = panes.get(id)?.claude;
+  const body = reason === "bell" ? "Process signaled attention" : reason === "claude" ? `${pc ? AG[pc.kind].name : "Agent"} is waiting for you${pc && pc.task ? " — " + pc.task : ""}` : "Session idle after output";
   const visible = document.visibilityState === "visible";
   if (onScreen(id) && visible) return; // you're looking at it — the tab dot suffices
   const key = id + ":" + reason, now = Date.now();
@@ -3127,33 +3384,42 @@ document.addEventListener("keydown", (e) => {
 });
 
 // ---------- new session modal ----------
+// one dialog for every "new" entry point: plain terminal, or a terminal that starts Claude / Devin
 const modal = $("#new-modal"), shellSel = $("#new-shell"), cwdIn = $("#new-cwd"), nameIn = $("#new-name");
-function openModal() {
-  const w = currentWs ? wsById(currentWs) : null;
+let modalWs = null;
+function openModal(wsId) {
+  modalWs = wsId === undefined ? (currentWs ?? null) : wsId;
+  const w = modalWs ? wsById(modalWs) : null;
   modal.classList.remove("hidden");
+  $("#new-title-ws").textContent = w ? `in ${w.name}` : "";
   cwdIn.value = w ? w.path : (hostInfo.home || "");
   cwdIn.disabled = !!w;
   const ds = localStorage.getItem("rd.shell");
   if (ds && [...shellSel.options].some((o) => o.value === ds)) shellSel.value = ds;
   nameIn.value = "";
   nameIn.placeholder = w ? w.name : "(optional)";
-  nameIn.focus();
+  if (!document.body.classList.contains("touch-ui")) nameIn.focus(); // don't pop the soft keyboard over the choices
 }
 function closeModal() { modal.classList.add("hidden"); cwdIn.disabled = false; }
-$("#new-btn").onclick = openModal;
-$("#empty-new").onclick = openModal;
+function modalCreate(kind) { // kind: null = plain terminal, else an AGENT_CLI key
+  const opts = { shell: shellSel.value, name: nameIn.value || kind || undefined, ...(modalWs ? { workspace: modalWs } : { cwd: cwdIn.value || undefined }) };
+  if (view === "work" && splitId) { wantSplitForNew = true; setTimeout(() => { wantSplitForNew = false; }, 8000); } // opens in the guest pane
+  else if (view !== "work" || (currentWs ?? null) !== modalWs) enterWorkspace(modalWs);
+  if (kind) launchAgent(kind, null, opts);
+  else send({ type: "create", cols: 120, rows: 32, ...opts });
+  closeModal();
+}
+$("#new-btn").onclick = () => openModal();
+$("#empty-new").onclick = () => openModal();
+$("#new-ok").onclick = () => modalCreate(null);
+for (const k of Object.keys(AGENT_CLI)) {
+  const side = $(`#new-${k}`); if (side) side.onclick = () => launchAgent(k, currentWs ?? null);
+  $(`#new-ok-${k}`).onclick = () => modalCreate(k);
+}
 $("#new-cancel").onclick = closeModal;
 modal.onclick = (e) => { if (e.target === modal) closeModal(); };
 $("#new-browse").onclick = () => openPicker((p) => { cwdIn.value = p; });
-$("#new-ok").onclick = () => {
-  if (splitId) { wantSplitForNew = true; setTimeout(() => { wantSplitForNew = false; }, 8000); } // opens in the guest pane
-  send({
-    type: "create", shell: shellSel.value, cols: 120, rows: 32,
-    name: nameIn.value || undefined,
-    ...(currentWs ? { workspace: currentWs } : { cwd: cwdIn.value || undefined }),
-  });
-  closeModal();
-};
+nameIn.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); modalCreate(null); } });
 
 // ---------- boot ----------
 (async () => {

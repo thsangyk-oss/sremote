@@ -12,7 +12,7 @@
 <meta name="theme-color" content="#070a10">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="stylesheet" href="/vendor/xterm.css">
-<link rel="stylesheet" href="/style.css?v=35">
+<link rel="stylesheet" href="/style.css?v=39">
 </head>
 <body>
 
@@ -81,7 +81,11 @@
       <input id="nav-q" type="search" placeholder="Find project or session" autocomplete="off" autocapitalize="none" spellcheck="false">
     </label>
     <div class="side-section" id="nav-tree"></div>
-    <button id="new-btn"><svg class="ic" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>New terminal <span id="new-btn-ws"></span></button>
+    <div class="new-row">
+      <button id="new-btn"><svg class="ic" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>New terminal <span id="new-btn-ws"></span></button>
+      <button id="new-claude" title="New terminal in this project running Claude Code"><span class="cl-ico">✳</span>Claude</button>
+      <button id="new-devin" title="New terminal in this project running Devin"><span class="dv-ico">◆</span>Devin</button>
+    </div>
     <div class="side-foot">
       <div id="host-info"></div>
       <div id="conn2"><span class="dot" id="conn-dot2"></span><span id="conn-text2">connecting…</span><span id="latency2"></span></div>
@@ -106,6 +110,33 @@
       <button id="ts-prev" class="mini-btn" title="Previous (Shift+Enter)">↑</button>
       <button id="ts-next" class="mini-btn" title="Next (Enter)">↓</button>
       <button id="ts-x" class="mini-btn" title="Close (Esc)">×</button>
+    </div>
+    <div id="claudebar" class="hidden">
+      <div id="claude-cmds" class="hidden"><div id="cc-list"></div></div>
+      <div id="cb-more" class="hidden"></div>
+      <div class="cb-status"><span class="cb-glyph" id="cb-glyph">✳</span><span class="cb-txt"><b id="cb-task">Claude Code</b><small id="cb-state">waiting for you</small></span></div>
+      <div class="cb-keys">
+        <button class="cb-k cb-ask" data-c="1" title="Answer 1 — Yes">1</button>
+        <button class="cb-k cb-ask" data-c="2" title="Answer 2 — Yes, don't ask again">2</button>
+        <button class="cb-k cb-ask" data-c="3" title="Answer 3 — No">3</button>
+        <button class="cb-k cb-stop" data-c="stop" title="Interrupt (Claude: Esc · Devin: Esc Esc)"><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor" stroke="none"/></svg></button>
+        <span class="cb-sep"></span>
+        <button class="cb-k" data-c="cmds" title="Slash commands"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="4"/><path d="M14.5 7.5l-5 9"/></svg></button>
+        <button class="cb-k" data-c="mode" title="Cycle permission mode (Shift+Tab)"><svg viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6z"/><path d="M9.5 12.5l1.8 1.8 3.5-3.8"/></svg></button>
+        <button class="cb-k" data-c="at" title="Mention a file (@)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.6"/><path d="M15.6 8.4v5.1a2.4 2.4 0 0 0 4.8 0V12a8.4 8.4 0 1 0-3.3 6.7"/></svg></button>
+        <button class="cb-k only-claude" data-c="bash" title="Run a shell command (! prefix)"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M7.5 9.5l3 2.5-3 2.5M12.5 15h4"/></svg></button>
+        <button class="cb-k only-claude" data-c="rewind" title="Rewind / edit a previous message (Esc Esc)"><svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.4-5.7"/><path d="M4 4v4.5h4.5"/><path d="M12 8v4l2.5 1.5"/></svg></button>
+        <button class="cb-k" data-c="details" title="Expand / collapse details (Ctrl+O)"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 11h16M4 16h8"/><path d="M15 16l3 3 3-3"/></svg></button>
+        <button class="cb-k only-claude" data-c="todos" title="Todo list (Ctrl+T)"><svg viewBox="0 0 24 24"><path d="M4 6.5l1.5 1.5L8 5.5M4 12.5l1.5 1.5L8 11.5M4 18.5l1.5 1.5L8 17.5"/><path d="M11 7h9M11 13h9M11 19h9"/></svg></button>
+        <button class="cb-k only-devin" data-c="redraw" title="Clear / redraw the screen (Ctrl+L)"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 0 1-14.3 4.9M4 12A8 8 0 0 1 18.3 7.1"/><path d="M18.5 3v4.5H14M5.5 21v-4.5H10"/></svg></button>
+        <button class="cb-k" data-c="xs" title="Ctrl+X Ctrl+S"><svg viewBox="0 0 24 24"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg></button>
+        <span class="cb-sep cb-nav"></span>
+        <button class="cb-k cb-nav" data-c="up" title="Up"><svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg></button>
+        <button class="cb-k cb-nav" data-c="down" title="Down"><svg viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"/></svg></button>
+        <button class="cb-k cb-nav" data-c="enter" title="Enter"><svg viewBox="0 0 24 24"><path d="M19 5v6a3 3 0 0 1-3 3H6"/><path d="M10 10l-4 4 4 4"/></svg></button>
+        <button class="cb-k cb-kbd" data-c="keys" title="More keys (Esc, Tab, Ctrl…)"><svg viewBox="0 0 24 24"><rect x="2.5" y="6" width="19" height="12" rx="2.5"/><path d="M6 10h.01M9.5 10h.01M13 10h.01M16.5 10h.01M8 14h8"/></svg></button>
+        <button class="cb-k cb-x" data-c="hide" title="Hide this bar for this terminal"><svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17"/></svg></button>
+      </div>
     </div>
     <div id="typerow">
       <div id="typer-wrap">
@@ -158,7 +189,7 @@
 <!-- ============ modals ============ -->
 <div id="new-modal" class="modal hidden">
   <div class="modal-card">
-    <div class="modal-title"><img src="/logo.svg" alt="">New terminal</div>
+    <div class="modal-title"><img src="/logo.svg" alt="">New terminal <span id="new-title-ws" class="new-title-ws"></span></div>
     <label>Name</label>
     <input id="new-name" placeholder="(optional)">
     <label>Shell</label>
@@ -168,9 +199,14 @@
       <input id="new-cwd" placeholder="C:\Users\User">
       <button id="new-browse" class="btn-ghost" title="Browse…">…</button>
     </div>
+    <label>Start</label>
+    <div class="new-kinds">
+      <button id="new-ok" class="nk" title="Plain terminal (Enter)"><span class="nk-g"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M7.5 9.5l3 2.5-3 2.5M12.5 15h4"/></svg></span><b>Terminal</b><small>plain shell</small></button>
+      <button id="new-ok-claude" class="nk nk-claude" title="Create and start Claude Code"><span class="nk-g">✳</span><b>Claude Code</b><small>runs claude</small></button>
+      <button id="new-ok-devin" class="nk nk-devin" title="Create and start Devin"><span class="nk-g">◆</span><b>Devin</b><small>runs devin</small></button>
+    </div>
     <div class="modal-actions">
       <button id="new-cancel" class="btn-ghost">Cancel</button>
-      <button id="new-ok" class="btn">Create</button>
     </div>
   </div>
 </div>
@@ -352,6 +388,6 @@
 <script src="/vendor/addon-search.js"></script>
 <script src="/vendor/addon-web-links.js"></script>
 <script src="/vendor/addon-unicode11.js"></script>
-<script src="/app.js?v=60"></script>
+<script src="/app.js?v=64"></script>
 </body>
 </html>
