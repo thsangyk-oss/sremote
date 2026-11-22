@@ -76,28 +76,28 @@ try { $r = Invoke-RestMethod 'http://localhost:2209/api/info' -TimeoutSec 2
 try { Get-NetTCPConnection -LocalPort 2209 -State Listen -ErrorAction Stop |
       Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object {
         $pe = (Get-CimInstance Win32_Process -Filter "ProcessId=$($_)" -ErrorAction SilentlyContinue).ExecutablePath
-        if ($pe -match '([A-Za-z]:[\\/][^"'']*)[\\/]node[\\/]node\.exe') { Add-InstallCandidate $Matches[1] }
+        if ($pe -match '([A-Za-z]:[\\/][^"'':]*)[\\/]node[\\/]node\.exe') { Add-InstallCandidate $Matches[1] }
       } } catch {}
 
 # c) node processes: absolute server.js paths, live session broker, tray parent
 foreach ($p in (Get-CimInstance Win32_Process -Filter "name='node.exe'" -ErrorAction SilentlyContinue)) {
-    if ($p.CommandLine -match '([A-Za-z]:[\\/][^"'']*)[\\/]agent[\\/]session-host\.js') {
+    if ($p.CommandLine -match '([A-Za-z]:[\\/][^"'':]*)[\\/]agent[\\/]session-host\.js') {
         Add-InstallCandidate $Matches[1]
-        $script:liveBrokerDir = [IO.Path]::GetFullPath($Matches[1]).TrimEnd('\')
+        try { $script:liveBrokerDir = [IO.Path]::GetFullPath($Matches[1]).TrimEnd('\') } catch {}
     }
-    if ($p.CommandLine -match '([A-Za-z]:[\\/][^"'']*server\.js)') {
+    if ($p.CommandLine -match '([A-Za-z]:[\\/][^"'':]*server\.js)') {
         Add-InstallCandidate (Split-Path $Matches[1] -Parent)
     }
     # "node server.js" (relative) hides its dir - its parent is the tray exe,
     # whose absolute path sits at <dir>\agent\tray\SremoteTray.exe
     if ($p.ParentProcessId) {
         $par = Get-CimInstance Win32_Process -Filter "ProcessId=$($p.ParentProcessId)" -ErrorAction SilentlyContinue
-        if ($par -and $par.ExecutablePath -match '([A-Za-z]:[\\/][^"'']*)[\\/]agent[\\/]tray[\\/]SremoteTray\.exe') { Add-InstallCandidate $Matches[1] }
-        if ($par -and $par.CommandLine     -match '([A-Za-z]:[\\/][^"'']*)[\\/](start\.cmd|start\.bat)')      { Add-InstallCandidate $Matches[1] }
+        if ($par -and $par.ExecutablePath -match '([A-Za-z]:[\\/][^"'':]*)[\\/]agent[\\/]tray[\\/]SremoteTray\.exe') { Add-InstallCandidate $Matches[1] }
+        if ($par -and $par.CommandLine     -match '([A-Za-z]:[\\/][^"'':]*)[\\/](start\.cmd|start\.bat)')      { Add-InstallCandidate $Matches[1] }
     }
 }
 Get-CimInstance Win32_Process -Filter "name='SremoteTray.exe'" -ErrorAction SilentlyContinue | ForEach-Object {
-    if ($_.ExecutablePath -match '([A-Za-z]:[\\/][^"'']*)[\\/]agent[\\/]tray[\\/]SremoteTray\.exe') { Add-InstallCandidate $Matches[1] }
+    if ($_.ExecutablePath -match '([A-Za-z]:[\\/][^"'':]*)[\\/]agent[\\/]tray[\\/]SremoteTray\.exe') { Add-InstallCandidate $Matches[1] }
 }
 
 # helper: first absolute path inside a raw command/action string

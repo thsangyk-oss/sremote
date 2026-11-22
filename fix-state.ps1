@@ -80,8 +80,8 @@ foreach ($rk in 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run',
 }
 # 4) live processes: broker + server.js absolute paths reveal deep install dirs
 foreach ($p in (Get-CimInstance Win32_Process -Filter "name='node.exe'" -ErrorAction SilentlyContinue)) {
-    if ($p.CommandLine -match '([A-Za-z]:[\\/][^"'']*)[\\/]agent[\\/]session-host\.js') { Add-Found $Matches[1] }
-    if ($p.CommandLine -match '([A-Za-z]:[\\/][^"'']*server\.js)') { Add-Found (Split-Path $Matches[1] -Parent) }
+    if ($p.CommandLine -match '([A-Za-z]:[\\/][^"'':]*)[\\/]agent[\\/]session-host\.js') { Add-Found $Matches[1] }
+    if ($p.CommandLine -match '([A-Za-z]:[\\/][^"'':]*server\.js)') { Add-Found (Split-Path $Matches[1] -Parent) }
 }
 
 $target = $null; $best = $null; $bestN = -1
