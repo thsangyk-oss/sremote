@@ -12,7 +12,7 @@
 <meta name="theme-color" content="#070a10">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="stylesheet" href="/vendor/xterm.css">
-<link rel="stylesheet" href="/style.css?v=33">
+<link rel="stylesheet" href="/style.css?v=35">
 </head>
 <body>
 
@@ -58,13 +58,13 @@
         <span class="tool-txt"><b>Remote screen</b><small>View &amp; control the desktop</small></span>
       </div>
     </div>
+    <div id="peers-sec" class="hidden">
+      <div class="home-label">MACHINES <span class="fold-n" id="peers-n"></span></div>
+      <div id="home-peers"></div>
+    </div>
     <details id="dev-sec" class="tool-fold hidden">
       <summary>Dev servers <span class="fold-n" id="dev-n"></span></summary>
       <div id="home-dev"></div>
-    </details>
-    <details id="peers-sec" class="tool-fold hidden">
-      <summary>Machines <span class="fold-n" id="peers-n"></span></summary>
-      <div id="home-peers"></div>
     </details>
   </div>
 </div>
@@ -352,6 +352,6 @@
 <script src="/vendor/addon-search.js"></script>
 <script src="/vendor/addon-web-links.js"></script>
 <script src="/vendor/addon-unicode11.js"></script>
-<script src="/app.js?v=58"></script>
+<script src="/app.js?v=60"></script>
 </body>
 </html>

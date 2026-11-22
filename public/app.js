@@ -1259,30 +1259,76 @@ function sessMenu(e, s) {
 }
 
 // ---------- home: machines (tailnet peers) ----------
+// one icon per OS family: desktop monitor (windows/linux), laptop (macOS), phone (iOS/Android)
+function peerIcon(os) {
+  const o = (os || "").toLowerCase();
+  const scr = '<rect x="2" y="3" width="20" height="13" rx="2"/><path d="M8 21h8M12 16v5"/>';
+  if (o.includes("windows")) return `<svg class="ic" viewBox="0 0 24 24">${scr}<path d="M7 7h4v3H7zM13 7h4v3h-4zM7 11.5h4M13 11.5h4" stroke-width="1.6"/></svg>`;
+  if (o.includes("linux")) return `<svg class="ic" viewBox="0 0 24 24">${scr}<path d="M7 7.5l2.5 2-2.5 2M12 12h4" stroke-width="1.6"/></svg>`;
+  if (o.includes("mac") || o.includes("darwin")) return '<svg class="ic" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="11" rx="1.5"/><path d="M2 19h20l-1.5-4h-17z"/></svg>';
+  if (o.includes("ios") || o.includes("android")) return '<svg class="ic" viewBox="0 0 24 24"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></svg>';
+  return `<svg class="ic" viewBox="0 0 24 24">${scr}</svg>`;
+}
+function peerInfoRows(p) {
+  const s = p.sremote || {};
+  const conn = !p.online ? "offline" : p.direct ? "direct" : p.relay ? `relay (${p.relay})` : "—";
+  return [
+    ["Hostname", p.hostname], ["OS", p.os], ["Tailscale IP", p.ip], ["DNS", p.dnsName], ["Connection", conn],
+    ["S-remote", p.sremote ? `http://${p.ip}:2209` : "not running"],
+    ["User", s.hostUser], ["Mode", p.sremote ? (s.service ? "Windows service" : "app") : ""], ["Install", s.root],
+  ].filter((r) => r[1]).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("");
+}
+document.addEventListener("click", (e) => { // tap outside closes a tapped-open info card
+  if (!e.target.closest(".pt-iw")) document.querySelectorAll(".peer-tile.info-on").forEach((t) => t.classList.remove("info-on"));
+});
 async function renderMachines() {
   const sec = $("#peers-sec"), box = $("#home-peers");
   const j = await fetch("/api/peers").then((r) => r.json()).catch(() => null);
   const peers = (j && j.peers) || [];
   if (!peers.length) { sec.classList.add("hidden"); return; }
   sec.classList.remove("hidden");
-  $("#peers-n").textContent = `${peers.filter((p) => p.online).length}/${peers.length} online`;
+  // always shown: this machine + peers answering S-remote on :2209; the rest sit behind a toggle
+  const main = peers.filter((p) => p.self || p.sremote), rest = peers.filter((p) => !p.self && !p.sremote);
+  $("#peers-n").textContent = `${main.filter((p) => p.online).length}/${main.length} online`;
+  let showAll = false;
+  try { showAll = localStorage.getItem("rd.peers.all") === "1"; } catch {}
   box.innerHTML = "";
-  for (const p of peers) {
+  const grid = document.createElement("div");
+  grid.className = "peer-grid";
+  for (const p of showAll ? main.concat(rest) : main) {
     const d = document.createElement("div");
-    d.className = "peer-row" + (p.online ? "" : " off");
-    const tag = !p.online ? "offline" : p.direct ? "direct" : p.relay ? `relay ${p.relay}` : "—";
-    d.innerHTML = `<span class="peer-dot${p.online ? " on" : ""}"></span>
-      <span class="peer-name">${esc(p.name || p.hostname || "?")}${p.name && p.hostname && p.name !== p.hostname ? ` <span class="peer-host">${esc(p.hostname)}</span>` : ""}${p.self ? ` <span class="peer-self">(this machine)</span>` : ""}</span>
-      <span class="peer-os">${esc(p.os || "")}</span>
-      <span class="peer-tag">${esc(tag)}</span>
-      ${p.sremote ? `<span class="peer-sr">S-remote ✓</span>` : ""}`;
+    d.className = "peer-tile" + (p.online ? "" : " off") + (p.sremote || p.self ? "" : " plain");
+    const name = p.name || p.hostname || "?";
+    d.innerHTML = `<span class="pt-ico">${peerIcon(p.os)}<span class="peer-dot${p.online ? " on" : ""}"></span></span>
+      <span class="pt-name" title="${esc(name)}">${esc(name)}</span>
+      <span class="pt-sub">${p.self ? "this machine" : !p.online ? "offline" : p.sremote ? "S-remote" : esc(p.os || "")}</span>
+      <span class="pt-iw"><button class="pt-i" title="Details" aria-label="Details">i</button><dl class="pt-info">${peerInfoRows(p)}</dl></span>`;
+    d.querySelector(".pt-iw").addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (!e.target.closest(".pt-i")) return; // clicks inside the card (select/copy) do nothing
+      const was = d.classList.contains("info-on");
+      document.querySelectorAll(".peer-tile.info-on").forEach((t) => t.classList.remove("info-on"));
+      d.classList.toggle("info-on", !was);
+    });
     if (p.self) { d.classList.add("link"); d.title = "Rename this machine"; d.onclick = (e) => machineMenu(e); }
     else if (p.sremote && p.ip) { // peer runs S-remote → click opens its UI
       d.classList.add("link");
-      d.title = `http://${p.ip}:2209`;
+      d.title = `Open S-remote on ${name}`;
       d.onclick = () => window.open(`http://${p.ip}:2209`, "_blank");
     }
-    box.appendChild(d);
+    grid.appendChild(d);
+  }
+  box.appendChild(grid);
+  if (rest.length) {
+    const t = document.createElement("button");
+    t.className = "peer-more";
+    const on = rest.filter((p) => p.online).length;
+    t.textContent = showAll ? "Hide machines without S-remote" : `Show ${rest.length} other machine${rest.length > 1 ? "s" : ""} (${on} online, no S-remote)`;
+    t.onclick = () => {
+      try { localStorage.setItem("rd.peers.all", showAll ? "0" : "1"); } catch {}
+      renderMachines();
+    };
+    box.appendChild(t);
   }
 }
 
