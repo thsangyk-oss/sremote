@@ -399,6 +399,10 @@ body.touch-ui #keybar::-webkit-scrollbar, body.typebar #keybar::-webkit-scrollba
 }
 .kb-key:active { background: var(--accent); color: #071019; }
 .kb-mod.latched { background: var(--accent); color: #071019; border-color: var(--accent); }
+.kb-mod.locked { background: var(--accent); color: #071019; border-color: #fff; box-shadow: inset 0 -3px 0 rgba(7,16,25,.55); }
+.kb-mod.locked::after { content: " 🔒"; font-size: 10px; }
+body.mods-on #typer { border-color: var(--accent) !important; box-shadow: 0 0 0 3px rgba(90,162,255,.28) !important; }
+body.mods-on #typer::placeholder { color: var(--accent); opacity: 1; }
 
 /* ---------- scrim ---------- */
 #scrim { display: none; position: absolute; inset: 0; z-index: 5; background: rgba(4,7,12,.5); backdrop-filter: blur(2px); }

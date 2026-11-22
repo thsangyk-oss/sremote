@@ -618,6 +618,12 @@ function ensurePane(id) {
   term.onData((d) => {
     const rep = isTermReport(d);
     if (rep && p.replayUntil > Date.now()) return;
+    if (!rep && modsOn() && id === activeId) { // keybar Ctrl/Alt/Shift latched → combine with this key
+      const one = d.startsWith("\x1b") || d.length === 1 ? d : [...d][0];
+      modSend(one);
+      if (one.length < d.length) send({ type: "in", id, data: d.slice(one.length) }); // IME burst: only the first char gets the mods
+      return;
+    }
     send({ type: "in", id, data: d, rep: rep || undefined });
   });
   term.onResize(({ cols, rows }) => send({ type: "resize", id, cols, rows }));
@@ -1402,11 +1408,15 @@ makeResizable($("#rs-side"), sidebar, 170, 400, "rd.w.side", false);
 makeResizable($("#rs-files"), filesPanel, 190, 480, "rd.w.files", true);
 
 // ---------- mobile keybar (Esc/Tab/Ctrl/arrows…) ----------
-let ctrlLatch = false, altLatch = false;
+// Sticky modifiers: tap = one-shot (next key only), tap again = locked, third tap = off.
+// The next key can come from the keybar, the soft keyboard (typer or terminal), or a hardware keyboard.
+const mods = { ctrl: 0, alt: 0, shift: 0 }; // 0 off · 1 once · 2 locked
+const MOD_NAME = { ctrl: "Ctrl", alt: "Alt", shift: "Shift" };
+const modsOn = () => !!(mods.ctrl || mods.alt || mods.shift);
 // key catalog — config = array of ids in localStorage["rd.keybar.v1"]
 const KB_KEYS = [
   { id: "esc", l: "Esc", d: "\x1b" }, { id: "tab", l: "Tab", d: "\t" },
-  { id: "ctrl", l: "Ctrl", mod: "ctrl" }, { id: "alt", l: "Alt", mod: "alt" },
+  { id: "ctrl", l: "Ctrl", mod: "ctrl" }, { id: "alt", l: "Alt", mod: "alt" }, { id: "shift", l: "Shift", mod: "shift" },
   { id: "left", l: "←", d: "\x1b[D" }, { id: "down", l: "↓", d: "\x1b[B" },
   { id: "up", l: "↑", d: "\x1b[A" }, { id: "right", l: "→", d: "\x1b[C" },
   { id: "pipe", l: "|", d: "|" }, { id: "tilde", l: "~", d: "~" },
@@ -1423,28 +1433,84 @@ const KB_KEYS = [
   { id: "f1", l: "F1", d: "\x1bOP" }, { id: "f2", l: "F2", d: "\x1bOQ" },
   { id: "f3", l: "F3", d: "\x1bOR" }, { id: "f4", l: "F4", d: "\x1bOS" },
 ];
-const KB_DEFAULT = ["esc", "tab", "ctrl", "alt", "left", "down", "up", "right", "pipe", "tilde", "dash", "slash", "space", "c-c", "c-z", "c-d", "c-l"];
+const KB_DEFAULT = ["esc", "tab", "ctrl", "alt", "shift", "left", "down", "up", "right", "pipe", "tilde", "dash", "slash", "space", "c-c", "c-z", "c-d", "c-l"];
 function kbConfig() {
   try {
     const a = JSON.parse(localStorage.getItem("rd.keybar.v1") || "null");
-    if (Array.isArray(a)) return a;
+    if (Array.isArray(a)) {
+      if (!localStorage.getItem("rd.keybar.shift") && a.includes("ctrl") && !a.includes("shift")) { // one-time: saved layouts predate Shift
+        const at = a.includes("alt") ? a.indexOf("alt") + 1 : a.indexOf("ctrl") + 1;
+        a.splice(at, 0, "shift");
+        localStorage.setItem("rd.keybar.v1", JSON.stringify(a));
+      }
+      localStorage.setItem("rd.keybar.shift", "1");
+      return a;
+    }
   } catch {}
   return KB_DEFAULT;
 }
+// Apply latched modifiers to one key's worth of terminal input (xterm encoding).
+function modEncode(d) {
+  const c = !!mods.ctrl, a = !!mods.alt, s = !!mods.shift;
+  const m = 1 + (s ? 1 : 0) + (a ? 2 : 0) + (c ? 4 : 0); // xterm modifier param
+  let r;
+  if ((r = /^\x1b\[([A-DHF])$/.exec(d))) return m > 1 ? `\x1b[1;${m}${r[1]}` : d; // arrows / Home / End
+  if ((r = /^\x1b\[(\d+)~$/.exec(d))) return m > 1 ? `\x1b[${r[1]};${m}~` : d;   // PgUp/PgDn/Del/Ins
+  if ((r = /^\x1bO([PQRS])$/.exec(d))) return m > 1 ? `\x1b[1;${m}${r[1]}` : d;  // F1–F4
+  if (d === "\t") return s && !c ? (a ? "\x1b\x1b[Z" : "\x1b[Z") : (a ? "\x1b\t" : "\t"); // Shift+Tab = back-tab
+  if (d === "\r") return s || a ? "\x1b\r" : d;                                     // Shift/Alt+Enter → ESC CR (TUI newline)
+  if (d === "\x7f") return (a ? "\x1b" : "") + (c ? "\x08" : "\x7f");              // Ctrl+BS = ^H, Alt+BS = delete word
+  if (d.length === 1) {
+    let ch = s ? d.toUpperCase() : d;
+    if (c) {
+      const u = ch.toUpperCase();
+      if (/^[A-Z]$/.test(u)) ch = String.fromCharCode(u.charCodeAt(0) & 0x1f);
+      else if (ch === " " || ch === "@" || ch === "2") ch = "\x00";
+      else if (ch === "[" || ch === "3") ch = "\x1b";
+      else if (ch === "\\" || ch === "4") ch = "\x1c";
+      else if (ch === "]" || ch === "5") ch = "\x1d";
+      else if (ch === "^" || ch === "6") ch = "\x1e";
+      else if (ch === "_" || ch === "-" || ch === "/" || ch === "7") ch = "\x1f";
+      else if (ch === "?" || ch === "8") ch = "\x7f";
+    }
+    return (a ? "\x1b" : "") + ch;
+  }
+  return (a ? "\x1b" : "") + d;
+}
+function modLabel(raw) { // "Ctrl+Shift+X" for the toast
+  const k = { "\r": "Enter", "\t": "Tab", "\x7f": "Bksp", " ": "Space", "\x1b": "Esc" }[raw] || KB_KEYS.find((x) => x.d === raw)?.l || raw.toUpperCase();
+  return ["ctrl", "alt", "shift"].filter((n) => mods[n]).map((n) => MOD_NAME[n]).concat(k).join("+");
+}
+function modConsume() { // one-shot mods drop after a key, locked ones stay
+  for (const n in mods) if (mods[n] === 1) mods[n] = 0;
+  syncLatch();
+}
+// Send one key with the latched modifiers applied. raw = the unmodified key's terminal data.
+function modSend(raw) {
+  if (!activeId) return;
+  const lbl = modLabel(raw);
+  send({ type: "in", id: activeId, data: modEncode(raw) });
+  modConsume();
+  toast(`Sent ${lbl}`);
+}
 function sendKey(def) {
   if (!activeId) return;
-  let data = def.d;
-  if (ctrlLatch) {
-    if (/^[a-z]$/i.test(def.d)) data = String.fromCharCode(def.d.toUpperCase().charCodeAt(0) & 0x1f);
-    ctrlLatch = false; syncLatch();
-  }
-  if (altLatch) { data = "\x1b" + data; altLatch = false; syncLatch(); }
-  send({ type: "in", id: activeId, data });
+  if (modsOn()) { modSend(def.d); return; }
+  send({ type: "in", id: activeId, data: def.d });
 }
 function syncLatch() {
   document.querySelectorAll("#keybar .kb-mod").forEach((b) => {
-    b.classList.toggle("latched", (b.dataset.mod === "ctrl" && ctrlLatch) || (b.dataset.mod === "alt" && altLatch));
+    const v = mods[b.dataset.mod] || 0;
+    b.classList.toggle("latched", v === 1);
+    b.classList.toggle("locked", v === 2);
   });
+  const on = modsOn();
+  document.body.classList.toggle("mods-on", on);
+  const t = document.getElementById("typer");
+  if (t) {
+    if (t.dataset.ph == null) t.dataset.ph = t.placeholder;
+    t.placeholder = on ? ["ctrl", "alt", "shift"].filter((n) => mods[n]).map((n) => MOD_NAME[n]).join("+") + " + … press any key" : t.dataset.ph;
+  }
 }
 function rebuildKeybar() { // global — settings UI calls this after editing rd.keybar.v1
   const kb = $("#keybar");
@@ -1455,13 +1521,23 @@ function rebuildKeybar() { // global — settings UI calls this after editing rd
     const b = document.createElement("button");
     b.className = "kb-key" + (k.mod ? " kb-mod" : "");
     b.textContent = k.l;
-    if (k.mod) b.dataset.mod = k.mod;
+    if (k.mod) {
+      b.dataset.mod = k.mod;
+      b.title = `${k.l}: tap = next key only, tap again = lock, third tap = off`;
+      b.addEventListener("pointerdown", (e) => e.preventDefault()); // keep focus → soft keyboard stays up for the next key
+    }
     b.addEventListener("click", () => {
       reqNotifPerm();
+      if (k.mod) {
+        mods[k.mod] = (mods[k.mod] + 1) % 3;
+        syncLatch();
+        // keyboard hidden (nothing typable focused) → bring it up so a letter can follow
+        const ae = document.activeElement;
+        if (mods[k.mod] && !(ae && (ae.tagName === "TEXTAREA" || ae.tagName === "INPUT"))) $("#typer")?.focus();
+        return;
+      }
       const ae = document.activeElement;
-      if (ae && ae.blur) ae.blur(); // hide soft keyboard — keybar replaces it
-      if (k.mod === "ctrl") { ctrlLatch = !ctrlLatch; syncLatch(); return; }
-      if (k.mod === "alt") { altLatch = !altLatch; syncLatch(); return; }
+      if (ae && ae.blur && !modsOn()) ae.blur(); // hide soft keyboard — keybar replaces it (kept up mid-combo)
       sendKey(k);
     });
     kb.appendChild(b);
@@ -1603,6 +1679,34 @@ typer.addEventListener("touchend", (e) => {
   if (navigator.vibrate) try { navigator.vibrate(8); } catch {}
 });
 
+// keybar modifiers latched → the next key typed into the typer goes straight to the terminal as a combo
+const MOD_KEYMAP = { Enter: "\r", Tab: "\t", Backspace: "\x7f", Escape: "\x1b", ArrowUp: "\x1b[A", ArrowDown: "\x1b[B", ArrowRight: "\x1b[C", ArrowLeft: "\x1b[D", Home: "\x1b[H", End: "\x1b[F", Delete: "\x1b[3~", PageUp: "\x1b[5~", PageDown: "\x1b[6~" };
+let modSnap = null; // typer state before an uncancelable (IME) insert, restored on "input"
+typer.addEventListener("keydown", (e) => {
+  if (!modsOn() || e.isComposing || e.ctrlKey || e.metaKey) return;
+  const raw = MOD_KEYMAP[e.key] || (e.key && e.key.length === 1 ? e.key : null); // Android soft keys = "Unidentified" → beforeinput path
+  if (raw == null) return;
+  e.preventDefault(); e.stopImmediatePropagation();
+  modSend(raw);
+});
+typer.addEventListener("beforeinput", (e) => {
+  if (!modsOn()) return;
+  const t = e.inputType || "";
+  const raw = t === "deleteContentBackward" ? "\x7f" : t === "insertLineBreak" || t === "insertParagraph" ? "\r" : t.startsWith("insert") && e.data ? [...e.data][0] : null;
+  if (raw == null) return;
+  if (e.cancelable) { e.preventDefault(); modSend(raw); return; }
+  modSnap = { v: typer.value, s: typer.selectionStart, e: typer.selectionEnd, raw }; // composition: undo after the fact
+});
+typer.addEventListener("input", (e) => {
+  if (!modSnap) return;
+  const sn = modSnap; modSnap = null;
+  e.stopImmediatePropagation();
+  const v = typer.value; // what actually got inserted (IME may differ from e.data)
+  let a = 0; while (a < sn.v.length && a < v.length && sn.v[a] === v[a]) a++;
+  const ins = v.slice(a, v.length - (sn.v.length - sn.e));
+  typer.value = sn.v; typer.selectionStart = sn.s; typer.selectionEnd = sn.e; // assigning value also ends the IME composition
+  modSend(sn.raw === "\x7f" || sn.raw === "\r" ? sn.raw : ([...ins][0] || sn.raw));
+}, true);
 typer.addEventListener("keydown", (e) => {
   if (e.key === "r" && e.ctrlKey && !e.altKey && !e.metaKey) { e.preventDefault(); histOpen() ? histHide() : histShow(); e.stopPropagation(); return; }
   if (histOpen() && !e.isComposing) {
